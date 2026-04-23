@@ -1,19 +1,20 @@
-// Declarative Extension Applicator (Option A)
+// Declarative Extension Applicator
 //
-// Reads structured patch declarations from V1WorkspacePermission template
-// instances and applies them generically to ResourceDef[].
+// Reads structured patch declarations from extension template instances
+// and applies them generically to ResourceDef[].
 //
-// The patch rules live in TypeSpec (owned by the RBAC team) via the
-// kessel-extensions.tsp library. This emitter code is extension-agnostic:
+// Extension templates live in TypeSpec (e.g. rbac-v1-extensions.tsp,
+// service-extensions.tsp). This emitter code is extension-agnostic:
 // it knows how to parse patch-rule syntax (boolRelations, permission,
-// public, accumulate, addField) but has zero knowledge of specific
-// extension patterns like workspace_permission or view_metadata.
+// public, accumulate, addField, addAnnotation) but has zero knowledge
+// of specific extension patterns like workspace_permission or view_metadata.
 
 import type { Program, Model, Type } from "@typespec/compiler";
 import { isTemplateInstance, navigateProgram } from "@typespec/compiler";
-import type { ResourceDef, RelationDef, RelationBody, V1Extension } from "./lib.js";
+import type { ResourceDef, RelationDef, RelationBody, V1Extension, ExtensionTemplate } from "./lib.js";
 import {
-  findV1PermissionTemplate,
+  findExtensionTemplate,
+  findAllExtensionTemplates,
   getNamespaceFQN,
   isInstanceOf,
   parsePermissionExpr,
@@ -58,6 +59,7 @@ function failPatch(
 // ─── Declarative Extension Instance ──────────────────────────────────
 
 export interface DeclaredExtension {
+  templateName: string;
   params: Record<string, string>;
   patchRules: PatchRule[];
 }
@@ -100,11 +102,6 @@ export const V1_WORKSPACE_PERMISSION_TEMPLATE_RULES: readonly PatchRule[] = [
     patchType: "accumulate",
     rawValue: "view_metadata=or({v2}),when={verb}==read,public=true",
   },
-  {
-    target: "jsonSchema",
-    patchType: "addField",
-    rawValue: "{v2}_id=string:uuid,required=true",
-  },
 ];
 
 /** Build declarative extension instances from V1 triples (for tests and tooling without a TypeSpec Program). */
@@ -112,6 +109,7 @@ export function declaredExtensionsFromV1Extensions(
   exts: V1Extension[],
 ): DeclaredExtension[] {
   return exts.map((ext) => ({
+    templateName: "V1WorkspacePermission",
     params: {
       application: ext.application,
       resource: ext.resource,
@@ -219,8 +217,8 @@ function getStringValue(t: Type): string | undefined {
   return undefined;
 }
 
-const PARAM_NAMES = ["application", "resource", "verb", "v2Perm"] as const;
-const PATCH_TARGETS = ["role", "roleBinding", "workspace", "jsonSchema"] as const;
+const KNOWN_PARAM_NAMES = ["application", "resource", "verb", "v2Perm", "key", "value"] as const;
+const PATCH_TARGETS = ["role", "roleBinding", "workspace", "jsonSchema", "metadata", "self"] as const;
 
 /**
  * Read `{target}_{patchType}` default string rules from the compiled
@@ -228,12 +226,12 @@ const PATCH_TARGETS = ["role", "roleBinding", "workspace", "jsonSchema"] as cons
  * Used by tests to ensure {@link V1_WORKSPACE_PERMISSION_TEMPLATE_RULES} stays aligned.
  */
 export function readDefaultPatchRulesFromTemplate(program: Program): PatchRule[] {
-  const template = findV1PermissionTemplate(program);
+  const template = findExtensionTemplate(program, "V1WorkspacePermission");
   if (!template) return [];
 
   const rules: PatchRule[] = [];
   for (const [name, prop] of template.properties) {
-    if ((PARAM_NAMES as readonly string[]).includes(name)) continue;
+    if ((KNOWN_PARAM_NAMES as readonly string[]).includes(name)) continue;
 
     const separatorIdx = name.indexOf("_");
     if (separatorIdx === -1) continue;
@@ -263,8 +261,8 @@ export function sortPatchRules(rules: readonly PatchRule[]): PatchRule[] {
   );
 }
 
-/** Extract params + patch rules from a V1WorkspacePermission template instance model. */
-function declaredExtensionFromModel(model: Model): DeclaredExtension | null {
+/** Extract params + patch rules from an extension template instance model. */
+function declaredExtensionFromModel(model: Model, templateName: string): DeclaredExtension | null {
   const params: Record<string, string> = {};
   const patchRules: PatchRule[] = [];
 
@@ -272,7 +270,7 @@ function declaredExtensionFromModel(model: Model): DeclaredExtension | null {
     const value = getStringValue(prop.type);
     if (!value) continue;
 
-    if ((PARAM_NAMES as readonly string[]).includes(name)) {
+    if ((KNOWN_PARAM_NAMES as readonly string[]).includes(name)) {
       params[name] = value;
       continue;
     }
@@ -288,16 +286,11 @@ function declaredExtensionFromModel(model: Model): DeclaredExtension | null {
     }
   }
 
-  if (
-    !params.application ||
-    !params.resource ||
-    !params.verb ||
-    !params.v2Perm
-  ) {
+  if (Object.keys(params).length === 0) {
     return null;
   }
 
-  return { params, patchRules };
+  return { templateName, params, patchRules };
 }
 
 function pushDeclaredUnique(
@@ -312,15 +305,16 @@ function pushDeclaredUnique(
 }
 
 /**
- * Single discovery path for V1WorkspacePermission: program models (navigateProgram)
- * plus top-level alias statements. Dedupes by `v2Perm`. Drives both patch
- * application and IR `extensions` (via {@link v1ExtensionsFromDeclarations}).
+ * Generic discovery for all extension template instances in the program.
+ * Finds instances via navigateProgram walk and top-level alias scan.
+ * Dedupes by template name + params.
  */
-export function discoverV1WorkspacePermissionDeclarations(
+export function discoverExtensionDeclarations(
   program: Program,
+  templates?: ExtensionTemplate[],
 ): DeclaredExtension[] {
-  const template = findV1PermissionTemplate(program);
-  if (!template) return [];
+  const allTemplates = templates ?? findAllExtensionTemplates(program);
+  if (allTemplates.length === 0) return [];
 
   const results: DeclaredExtension[] = [];
   const seen = new Set<string>();
@@ -332,10 +326,12 @@ export function discoverV1WorkspacePermissionDeclarations(
       const modelNsFQN = getNamespaceFQN(model.namespace);
       if (modelNsFQN.endsWith("Kessel")) return;
 
-      if (!isInstanceOf(model, template)) return;
-
-      const decl = declaredExtensionFromModel(model);
-      if (decl) pushDeclaredUnique(results, seen, decl);
+      for (const tmpl of allTemplates) {
+        if (!isInstanceOf(model, tmpl.model)) continue;
+        const decl = declaredExtensionFromModel(model, tmpl.name);
+        if (decl) pushDeclaredUnique(results, seen, decl);
+        break;
+      }
     },
   });
 
@@ -345,17 +341,32 @@ export function discoverV1WorkspacePermissionDeclarations(
       try {
         const aliasType = program.checker.getTypeForNode(statement);
         if (!aliasType || aliasType.kind !== "Model") continue;
-        if (!isInstanceOf(aliasType as Model, template)) continue;
 
-        const decl = declaredExtensionFromModel(aliasType as Model);
-        if (decl) pushDeclaredUnique(results, seen, decl);
+        for (const tmpl of allTemplates) {
+          if (!isInstanceOf(aliasType as Model, tmpl.model)) continue;
+          const decl = declaredExtensionFromModel(aliasType as Model, tmpl.name);
+          if (decl) pushDeclaredUnique(results, seen, decl);
+          break;
+        }
       } catch (err) {
-        discoverDebugWarn("skipped source statement during V1 alias scan", err);
+        discoverDebugWarn("skipped source statement during alias scan", err);
       }
     }
   }
 
   return results;
+}
+
+/**
+ * @deprecated Use discoverExtensionDeclarations(program) instead.
+ * Kept for backward compatibility during migration.
+ */
+export function discoverV1WorkspacePermissionDeclarations(
+  program: Program,
+): DeclaredExtension[] {
+  const template = findExtensionTemplate(program, "V1WorkspacePermission");
+  if (!template) return [];
+  return discoverExtensionDeclarations(program, [{ name: "V1WorkspacePermission", model: template }]);
 }
 
 /** Derive slim extension list for IR / metadata from unified declarations. */
@@ -374,12 +385,30 @@ export function v1ExtensionsFromDeclarations(
 
 // ─── Interpolation ───────────────────────────────────────────────────
 
+const SHORTHAND_MAP: Record<string, string> = {
+  app: "application",
+  res: "resource",
+  v2: "v2Perm",
+};
+
 function interpolate(template: string, params: Record<string, string>): string {
-  return template
-    .replace(/\{app\}/g, params.application ?? "")
-    .replace(/\{res\}/g, params.resource ?? "")
-    .replace(/\{verb\}/g, params.verb ?? "")
-    .replace(/\{v2\}/g, params.v2Perm ?? "");
+  return template.replace(/\{(\w+)\}/g, (_match, key: string) => {
+    const resolved = SHORTHAND_MAP[key] ?? key;
+    return params[resolved] ?? params[key] ?? "";
+  });
+}
+
+// ─── Target Resolution ──────────────────────────────────────────────
+
+const V1_TARGET_MAP: Record<string, string> = {
+  role: "rbac/role",
+  roleBinding: "rbac/role_binding",
+  workspace: "rbac/workspace",
+};
+
+function resolveTarget(target: string): string | null {
+  if (target === "jsonSchema" || target === "metadata" || target === "self") return target;
+  return V1_TARGET_MAP[target] ?? target;
 }
 
 // ─── Patch Rule Parsing ──────────────────────────────────────────────
@@ -405,9 +434,15 @@ function parsePermissionRule(value: string): RelationDef | null {
 
 // ─── Result Types ────────────────────────────────────────────────────
 
+export interface AnnotationEntry {
+  key: string;
+  value: string;
+}
+
 interface DeclaredPatchResult {
   resources: ResourceDef[];
   jsonSchemaFields: JsonSchemaFieldRule[];
+  annotations: Map<string, AnnotationEntry[]>;
 }
 
 export interface ApplyDeclaredPatchesOptions {
@@ -415,7 +450,36 @@ export interface ApplyDeclaredPatchesOptions {
   strict?: boolean;
 }
 
+// ─── Annotation Rule ─────────────────────────────────────────────────
+
+export interface AnnotationRule {
+  key: string;
+  value: string;
+}
+
+export function parseAnnotationRule(raw: string): AnnotationRule | null {
+  const eqIdx = raw.indexOf("=");
+  if (eqIdx === -1) return null;
+  const key = raw.slice(0, eqIdx).trim();
+  const value = raw.slice(eqIdx + 1).trim();
+  if (!key) return null;
+  return { key, value };
+}
+
 // ─── Application ─────────────────────────────────────────────────────
+
+function getOrCreateList<K, V>(map: Map<K, V[]>, key: K): V[] {
+  let list = map.get(key);
+  if (!list) {
+    list = [];
+    map.set(key, list);
+  }
+  return list;
+}
+
+function extensionLabel(ext: DeclaredExtension): string {
+  return ext.params.v2Perm ?? ext.params.key ?? ext.templateName ?? "?";
+}
 
 export function applyDeclaredPatches(
   resources: ResourceDef[],
@@ -423,31 +487,29 @@ export function applyDeclaredPatches(
   options?: ApplyDeclaredPatchesOptions,
 ): DeclaredPatchResult {
   const strict = options?.strict !== false;
-  const roleExtra: RelationDef[] = [];
-  const roleBindingExtra: RelationDef[] = [];
-  const workspaceExtra: RelationDef[] = [];
-  const publicPerms = new Set<string>();
+
+  const extraRelations = new Map<string, RelationDef[]>();
+  const publicPerms = new Map<string, Set<string>>();
   const addedBoolPerms = new Set<string>();
-
-  // Two-pass accumulators: keyed by "target/name" (e.g., "workspace/view_metadata")
   const accumulators = new Map<string, { rule: AccumulateRule; refs: string[] }>();
-
-  // JSON Schema field patches
   const jsonSchemaFields: JsonSchemaFieldRule[] = [];
+  const annotations = new Map<string, AnnotationEntry[]>();
 
   // ── Pass 1: Collect per-instance patches and accumulator contributions ──
 
   for (const ext of extensions) {
     for (const rule of ext.patchRules) {
       const value = interpolate(rule.rawValue, ext.params);
+      const resolved = resolveTarget(rule.target);
+      if (!resolved) continue;
 
       if (rule.patchType === "boolRelations") {
-        if (rule.target === "role") {
-          for (const rel of parseBoolRelations(value)) {
-            if (!addedBoolPerms.has(rel.name)) {
-              addedBoolPerms.add(rel.name);
-              roleExtra.push(rel);
-            }
+        const targetKey = resolved;
+        const list = getOrCreateList(extraRelations, targetKey);
+        for (const rel of parseBoolRelations(value)) {
+          if (!addedBoolPerms.has(rel.name)) {
+            addedBoolPerms.add(rel.name);
+            list.push(rel);
           }
         }
       } else if (rule.patchType === "permission") {
@@ -455,32 +517,34 @@ export function applyDeclaredPatches(
         if (!rel) {
           failPatch(
             strict,
-            `Invalid permission patch rule for extension ${ext.params.v2Perm ?? "?"} (${rule.target}): ${JSON.stringify(value)}`,
-            { v2Perm: ext.params.v2Perm ?? "", target: rule.target, raw: value },
+            `Invalid permission patch rule for extension ${extensionLabel(ext)} (${rule.target}): ${JSON.stringify(value)}`,
+            { extension: extensionLabel(ext), target: rule.target, raw: value },
           );
           continue;
         }
 
-        if (rule.target === "role") roleExtra.push(rel);
-        else if (rule.target === "roleBinding") roleBindingExtra.push(rel);
-        else if (rule.target === "workspace") {
-          rel.isPublic = publicPerms.has(rel.name);
-          workspaceExtra.push(rel);
+        const targetKey = resolved;
+        const pubSet = publicPerms.get(targetKey);
+        if (pubSet?.has(rel.name)) {
+          rel.isPublic = true;
         }
+        getOrCreateList(extraRelations, targetKey).push(rel);
       } else if (rule.patchType === "public") {
-        publicPerms.add(value);
+        const targetKey = resolved;
+        if (!publicPerms.has(targetKey)) publicPerms.set(targetKey, new Set());
+        publicPerms.get(targetKey)!.add(value);
       } else if (rule.patchType === "accumulate") {
         const parsed = parseAccumulateRule(rule.rawValue);
         if (!parsed) {
           failPatch(
             strict,
-            `Invalid accumulate patch rule for extension ${ext.params.v2Perm ?? "?"} (${rule.target}): ${JSON.stringify(rule.rawValue)}`,
-            { v2Perm: ext.params.v2Perm ?? "", target: rule.target, raw: rule.rawValue },
+            `Invalid accumulate patch rule for extension ${extensionLabel(ext)} (${rule.target}): ${JSON.stringify(rule.rawValue)}`,
+            { extension: extensionLabel(ext), target: rule.target, raw: rule.rawValue },
           );
           continue;
         }
 
-        const key = `${rule.target}/${parsed.name}`;
+        const key = `${resolved}/${parsed.name}`;
         if (!accumulators.has(key)) {
           accumulators.set(key, { rule: parsed, refs: [] });
         }
@@ -496,13 +560,13 @@ export function applyDeclaredPatches(
         } else {
           acc.refs.push(ref);
         }
-      } else if (rule.target === "jsonSchema" && rule.patchType === "addField") {
+      } else if (resolved === "jsonSchema" && rule.patchType === "addField") {
         const parsed = parseJsonSchemaFieldRule(value);
         if (!parsed) {
           failPatch(
             strict,
-            `Invalid jsonSchema_addField rule for extension ${ext.params.v2Perm ?? "?"}: ${JSON.stringify(value)}`,
-            { v2Perm: ext.params.v2Perm ?? "", raw: value },
+            `Invalid jsonSchema_addField rule for extension ${extensionLabel(ext)}: ${JSON.stringify(value)}`,
+            { extension: extensionLabel(ext), raw: value },
           );
           continue;
         }
@@ -510,8 +574,8 @@ export function applyDeclaredPatches(
         if (!application) {
           failPatch(
             strict,
-            `Extension ${ext.params.v2Perm ?? "?"} missing application param (required for jsonSchema_addField)`,
-            { v2Perm: ext.params.v2Perm ?? "" },
+            `Extension ${extensionLabel(ext)} missing application param (required for jsonSchema_addField)`,
+            { extension: extensionLabel(ext) },
           );
           continue;
         }
@@ -521,14 +585,34 @@ export function applyDeclaredPatches(
           application,
           ...(resource ? { resource } : {}),
         });
+      } else if (resolved === "metadata" && rule.patchType === "addAnnotation") {
+        const parsed = parseAnnotationRule(value);
+        if (!parsed) {
+          failPatch(
+            strict,
+            `Invalid metadata_addAnnotation rule for extension ${extensionLabel(ext)}: ${JSON.stringify(value)}`,
+            { extension: extensionLabel(ext), raw: value },
+          );
+          continue;
+        }
+        const ns = ext.params.application?.trim();
+        const res = ext.params.resource?.trim();
+        if (ns && res) {
+          const key = `${ns}/${res}`;
+          getOrCreateList(annotations, key).push(parsed);
+        }
       }
     }
   }
 
-  // Apply public flag retroactively to workspace permissions
-  for (const rel of workspaceExtra) {
-    if (publicPerms.has(rel.name)) {
-      rel.isPublic = true;
+  // Apply public flag retroactively to already-collected relations
+  for (const [targetKey, pubSet] of publicPerms) {
+    const rels = extraRelations.get(targetKey);
+    if (!rels) continue;
+    for (const rel of rels) {
+      if (pubSet.has(rel.name)) {
+        rel.isPublic = true;
+      }
     }
   }
 
@@ -537,7 +621,8 @@ export function applyDeclaredPatches(
   for (const [key, { rule, refs }] of accumulators) {
     if (refs.length === 0) continue;
 
-    const target = key.split("/")[0];
+    const slashIdx = key.lastIndexOf("/");
+    const targetKey = key.slice(0, slashIdx);
     let body: RelationBody;
 
     if (rule.op === "or") {
@@ -555,10 +640,7 @@ export function applyDeclaredPatches(
     }
 
     const rel: RelationDef = { name: rule.name, body, isPublic: rule.isPublic };
-
-    if (target === "workspace") workspaceExtra.push(rel);
-    else if (target === "role") roleExtra.push(rel);
-    else if (target === "roleBinding") roleBindingExtra.push(rel);
+    getOrCreateList(extraRelations, targetKey).push(rel);
   }
 
   // ── Build enriched resources ──
@@ -566,17 +648,11 @@ export function applyDeclaredPatches(
   const result: ResourceDef[] = [];
   for (const res of resources) {
     const merged = { ...res, relations: [...res.relations] };
-
-    if (res.name === "role" && res.namespace === "rbac") {
-      merged.relations.push(...roleExtra);
+    const key = `${res.namespace}/${res.name}`;
+    const extra = extraRelations.get(key);
+    if (extra) {
+      merged.relations.push(...extra);
     }
-    if (res.name === "role_binding" && res.namespace === "rbac") {
-      merged.relations.push(...roleBindingExtra);
-    }
-    if (res.name === "workspace" && res.namespace === "rbac") {
-      merged.relations.push(...workspaceExtra);
-    }
-
     result.push(merged);
   }
 
@@ -584,5 +660,5 @@ export function applyDeclaredPatches(
     result.unshift({ name: "principal", namespace: "rbac", relations: [] });
   }
 
-  return { resources: result, jsonSchemaFields };
+  return { resources: result, jsonSchemaFields, annotations };
 }

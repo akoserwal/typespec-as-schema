@@ -5,10 +5,11 @@
 //   2. JSONSchema (from data models, via built-in emitter)
 //   3. Intermediate representation (for Kessel Inventory API)
 //
-// Extension templates (V1WorkspacePermission + patch rules) live in ../lib/kessel-extensions.tsp
+// Extension templates (V1WorkspacePermission + patch rules) live in ../lib/rbac-v1-extensions.tsp
 // (platform vocabulary; service schemas import the same).
 
-import "../lib/kessel-extensions.tsp";
+import "../lib/rbac-v1-extensions.tsp";
+import "../lib/service-extensions.tsp";
 import "./rbac.tsp";
 import "./hbi.tsp";
 import "./remediations.tsp";

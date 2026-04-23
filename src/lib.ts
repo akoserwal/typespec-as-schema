@@ -72,8 +72,8 @@ export interface V1Extension {
 }
 
 /**
- * Discovers service resource models only. V1WorkspacePermission instances are
- * handled by `discoverV1WorkspacePermissionDeclarations` in declarative-extensions.ts
+ * Discovers service resource models only. Extension template instances are
+ * handled by `discoverExtensionDeclarations` in declarative-extensions.ts
  * (single source for IR metadata and patch application).
  */
 export function discoverResources(program: Program): {
@@ -82,7 +82,7 @@ export function discoverResources(program: Program): {
   const resources: ResourceDef[] = [];
   const seenResources = new Set<string>();
 
-  const v1PermTemplate = findV1PermissionTemplate(program);
+  const extensionTemplates = findAllExtensionTemplates(program);
 
   navigateProgram(program, {
     model(model: Model) {
@@ -91,7 +91,7 @@ export function discoverResources(program: Program): {
       const modelNsFQN = getNamespaceFQN(model.namespace);
       if (modelNsFQN.endsWith("Kessel")) return;
 
-      if (v1PermTemplate && isInstanceOf(model, v1PermTemplate)) {
+      if (extensionTemplates.some((t) => isInstanceOf(model, t.model))) {
         return;
       }
 
@@ -113,12 +113,17 @@ export function discoverResources(program: Program): {
   return { resources };
 }
 
-/** Template for workspace-scoped v1→v2 permission extensions (patch rules in kessel-extensions.tsp). */
-export function findV1PermissionTemplate(program: Program): Model | null {
+export interface ExtensionTemplate {
+  name: string;
+  model: Model;
+}
+
+/** Find a single extension template by name in the Kessel namespace. */
+export function findExtensionTemplate(program: Program, templateName: string): Model | null {
   const globalNs = program.getGlobalNamespaceType();
   function search(ns: Namespace): Model | null {
     for (const [, model] of ns.models) {
-      if (model.name === "V1WorkspacePermission") return model;
+      if (model.name === templateName) return model;
     }
     for (const [, childNs] of ns.namespaces) {
       const found = search(childNs);
@@ -127,6 +132,56 @@ export function findV1PermissionTemplate(program: Program): Model | null {
     return null;
   }
   return search(globalNs);
+}
+
+/** @deprecated Use findExtensionTemplate(program, "V1WorkspacePermission") instead. */
+export function findV1PermissionTemplate(program: Program): Model | null {
+  return findExtensionTemplate(program, "V1WorkspacePermission");
+}
+
+const PATCH_TARGET_NAMES = ["role", "roleBinding", "workspace", "jsonSchema", "metadata", "self"] as const;
+
+/**
+ * Discover all extension templates in the Kessel namespace.
+ * A model qualifies if it lives under Kessel and has properties matching
+ * the `{target}_{patchType}` convention.
+ */
+export function findAllExtensionTemplates(program: Program): ExtensionTemplate[] {
+  const results: ExtensionTemplate[] = [];
+  const globalNs = program.getGlobalNamespaceType();
+
+  function search(ns: Namespace): void {
+    if (!getNamespaceFQN(ns).endsWith("Kessel") && ns.name !== "Kessel") {
+      for (const [, childNs] of ns.namespaces) {
+        search(childNs);
+      }
+      return;
+    }
+
+    for (const [, model] of ns.models) {
+      if (hasExtensionShapedProperties(model)) {
+        results.push({ name: model.name, model });
+      }
+    }
+    for (const [, childNs] of ns.namespaces) {
+      search(childNs);
+    }
+  }
+
+  search(globalNs);
+  return results;
+}
+
+function hasExtensionShapedProperties(model: Model): boolean {
+  for (const [name] of model.properties) {
+    const sepIdx = name.indexOf("_");
+    if (sepIdx === -1) continue;
+    const target = name.slice(0, sepIdx);
+    if ((PATCH_TARGET_NAMES as readonly string[]).includes(target)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function isInstanceOf(model: Model, template: Model): boolean {
@@ -451,6 +506,7 @@ interface IntermediateRepresentation {
   spicedb: string;
   metadata: Record<string, ServiceMetadata>;
   jsonSchemas: Record<string, UnifiedJsonSchema>;
+  annotations?: Record<string, Record<string, string>>;
 }
 
 export function generateIR(
@@ -458,9 +514,10 @@ export function generateIR(
   fullSchema: ResourceDef[],
   extensions: V1Extension[],
   jsonSchemaFields: JsonSchemaExtraField[] = [],
+  annotations?: Map<string, { key: string; value: string }[]>,
 ): IntermediateRepresentation {
-  return {
-    version: "1.1.0",
+  const ir: IntermediateRepresentation = {
+    version: "1.2.0",
     generatedAt: new Date().toISOString(),
     source: mainFile,
     resources: fullSchema,
@@ -469,6 +526,20 @@ export function generateIR(
     metadata: generateMetadata(fullSchema, extensions),
     jsonSchemas: generateUnifiedJsonSchemas(fullSchema, jsonSchemaFields),
   };
+
+  if (annotations && annotations.size > 0) {
+    const out: Record<string, Record<string, string>> = {};
+    for (const [resourceKey, entries] of annotations) {
+      const obj: Record<string, string> = {};
+      for (const e of entries) {
+        obj[e.key] = e.value;
+      }
+      out[resourceKey] = obj;
+    }
+    ir.annotations = out;
+  }
+
+  return ir;
 }
 
 export { compile, NodeHost, path };

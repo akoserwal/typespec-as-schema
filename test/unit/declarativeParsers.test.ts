@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseAccumulateRule,
+  parseAnnotationRule,
   parseJsonSchemaFieldRule,
 } from "../../src/declarative-extensions.js";
 
@@ -78,5 +79,33 @@ describe("parseJsonSchemaFieldRule", () => {
   it("returns null for malformed input", () => {
     expect(parseJsonSchemaFieldRule("")).toBeNull();
     expect(parseJsonSchemaFieldRule("no_type")).toBeNull();
+  });
+});
+
+describe("parseAnnotationRule", () => {
+  it("parses a key=value annotation", () => {
+    const rule = parseAnnotationRule("feature_flag=staleness_v2");
+    expect(rule).not.toBeNull();
+    expect(rule!.key).toBe("feature_flag");
+    expect(rule!.value).toBe("staleness_v2");
+  });
+
+  it("parses a numeric value", () => {
+    const rule = parseAnnotationRule("retention_days=90");
+    expect(rule).not.toBeNull();
+    expect(rule!.key).toBe("retention_days");
+    expect(rule!.value).toBe("90");
+  });
+
+  it("returns null for empty string", () => {
+    expect(parseAnnotationRule("")).toBeNull();
+  });
+
+  it("returns null for string without equals", () => {
+    expect(parseAnnotationRule("no_value")).toBeNull();
+  });
+
+  it("returns null when key is empty", () => {
+    expect(parseAnnotationRule("=value")).toBeNull();
   });
 });

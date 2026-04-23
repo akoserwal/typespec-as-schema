@@ -3,21 +3,30 @@
 import type { Program } from "@typespec/compiler";
 import type { ResourceDef, JsonSchemaExtraField } from "./lib.js";
 import {
-  discoverV1WorkspacePermissionDeclarations,
+  discoverExtensionDeclarations,
   applyDeclaredPatches,
   type ApplyDeclaredPatchesOptions,
+  type AnnotationEntry,
+  type DeclaredExtension,
 } from "./declarative-extensions.js";
+
+export interface ExpandedSchema {
+  fullSchema: ResourceDef[];
+  jsonSchemaFields: JsonSchemaExtraField[];
+  annotations: Map<string, AnnotationEntry[]>;
+  declared: DeclaredExtension[];
+}
 
 export function expandSchemaWithExtensions(
   program: Program,
   resources: ResourceDef[],
   patchOptions?: ApplyDeclaredPatchesOptions,
-): { fullSchema: ResourceDef[]; jsonSchemaFields: JsonSchemaExtraField[] } {
-  const declared = discoverV1WorkspacePermissionDeclarations(program);
-  const { resources: fullSchema, jsonSchemaFields } = applyDeclaredPatches(
+): ExpandedSchema {
+  const declared = discoverExtensionDeclarations(program);
+  const { resources: fullSchema, jsonSchemaFields, annotations } = applyDeclaredPatches(
     resources,
     declared,
     patchOptions,
   );
-  return { fullSchema, jsonSchemaFields };
+  return { fullSchema, jsonSchemaFields, annotations, declared };
 }

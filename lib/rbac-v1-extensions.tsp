@@ -1,5 +1,5 @@
-// Kessel Extension Library
-// Declarative extension templates for Zanzibar-style authorization patterns.
+// RBAC V1 Extension Library
+// Declarative extension template for V1 workspace permission migration.
 // The RBAC team defines the patch rules here as structured string properties.
 // The generic emitter reads these rules and applies patches to the model
 // without any extension-specific code.
@@ -12,7 +12,7 @@
 //   {target}_{patchType}
 //
 //   target:    role | roleBinding | workspace | jsonSchema
-//   patchType: boolRelations | permission | public | accumulate | addField
+//   patchType: boolRelations | permission | public | accumulate
 //
 // Patch-rule syntax:
 //   boolRelations:  comma-separated names to add as BoolRelation<Principal>
@@ -21,8 +21,6 @@
 //   accumulate:     name=op(ref),when=condition,public=bool
 //                   Collects refs across all extension instances, merges with op.
 //                   "when" gates on a param equality check ({param}==value).
-//   addField:       name=type:format,required=bool
-//                   Adds a field to JSON Schema output for the extension's service.
 //
 // Placeholders: {app}, {res}, {verb}, {v2} are interpolated from the template params.
 
@@ -59,6 +57,4 @@ model V1WorkspacePermission<
   // Accumulate read-verb permissions into workspace.view_metadata (OR)
   workspace_accumulate: "view_metadata=or({v2}),when={verb}==read,public=true";
 
-  // Extension-generated writable relation → JSON Schema field on the service resource
-  jsonSchema_addField: "{v2}_id=string:uuid,required=true";
 }

@@ -4,7 +4,7 @@
 // authorization extensions, not data schemas.
 
 import "../lib/kessel.tsp";
-import "../lib/kessel-extensions.tsp";
+import "../lib/rbac-v1-extensions.tsp";
 import "./rbac.tsp";
 
 using Kessel;

@@ -107,34 +107,10 @@ definition inventory/host {
         "type": "string",
         "format": "uuid",
         "source": "relation workspace: rbac/workspace [ExactlyOne]"
-      },
-      "inventory_host_view_id": {
-        "type": "string",
-        "source": "extension-declared",
-        "format": "uuid"
-      },
-      "inventory_host_update_id": {
-        "type": "string",
-        "source": "extension-declared",
-        "format": "uuid"
-      },
-      "remediations_remediation_view_id": {
-        "type": "string",
-        "source": "extension-declared",
-        "format": "uuid"
-      },
-      "remediations_remediation_update_id": {
-        "type": "string",
-        "source": "extension-declared",
-        "format": "uuid"
       }
     },
     "required": [
-      "workspace_id",
-      "inventory_host_view_id",
-      "inventory_host_update_id",
-      "remediations_remediation_view_id",
-      "remediations_remediation_update_id"
+      "workspace_id"
     ]
   }
 }

@@ -1,2 +1,2 @@
 // Minimal entry: loads only platform extension template (for drift tests).
-import "../../lib/kessel-extensions.tsp";
+import "../../lib/rbac-v1-extensions.tsp";

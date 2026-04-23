@@ -11,9 +11,10 @@ import {
 } from "../../src/lib.js";
 import {
   discoverV1WorkspacePermissionDeclarations,
+  discoverExtensionDeclarations,
   v1ExtensionsFromDeclarations,
   type DeclaredExtension,
-  type JsonSchemaFieldRule,
+  type AnnotationEntry,
 } from "../../src/declarative-extensions.js";
 import { expandSchemaWithExtensions } from "../../src/pipeline.js";
 
@@ -24,7 +25,8 @@ const mainTsp = path.resolve(pocRoot, "schema/main.tsp");
 let fullSchema: ResourceDef[];
 let spicedbOutput: string;
 let declaredExtensions: DeclaredExtension[];
-let jsonSchemaFields: JsonSchemaFieldRule[];
+let allDeclared: DeclaredExtension[];
+let annotations: Map<string, AnnotationEntry[]>;
 let unifiedJsonSchemas: Record<string, UnifiedJsonSchema>;
 let resources: ResourceDef[];
 let extensions: V1Extension[];
@@ -36,11 +38,12 @@ beforeAll(async () => {
   declaredExtensions = discoverV1WorkspacePermissionDeclarations(
     discovered.program,
   );
+  allDeclared = discoverExtensionDeclarations(discovered.program);
   const expanded = expandSchemaWithExtensions(discovered.program, resources);
   fullSchema = expanded.fullSchema;
-  jsonSchemaFields = expanded.jsonSchemaFields;
+  annotations = expanded.annotations;
   spicedbOutput = generateSpiceDB(fullSchema);
-  unifiedJsonSchemas = generateUnifiedJsonSchemas(fullSchema, jsonSchemaFields);
+  unifiedJsonSchemas = generateUnifiedJsonSchemas(fullSchema, expanded.jsonSchemaFields);
 }, 30_000);
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -111,28 +114,18 @@ describe("Declarative extension discovery", () => {
     ]);
   });
 
-  it("each instance has 7 patch rules (role, roleBinding, workspace, jsonSchema)", () => {
+  it("each instance has 6 patch rules (role, roleBinding, workspace)", () => {
     for (const ext of declaredExtensions) {
-      expect(ext.patchRules.length).toBe(7);
+      expect(ext.patchRules.length).toBe(6);
     }
   });
 
-  it("attaches application (and resource) to collected JSON Schema field rules", () => {
-    const inv = jsonSchemaFields.filter((f) => f.application === "inventory");
-    const rem = jsonSchemaFields.filter((f) => f.application === "remediations");
-    expect(inv).toHaveLength(2);
-    expect(rem).toHaveLength(2);
-    expect(inv.every((f) => f.resource === "hosts")).toBe(true);
-    expect(rem.every((f) => f.resource === "remediations")).toBe(true);
-  });
-
-  it("patch rules cover role, roleBinding, workspace, and jsonSchema targets", () => {
+  it("patch rules cover role, roleBinding, and workspace targets", () => {
     for (const ext of declaredExtensions) {
       const targets = new Set(ext.patchRules.map((r) => r.target));
       expect(targets.has("role")).toBe(true);
       expect(targets.has("roleBinding")).toBe(true);
       expect(targets.has("workspace")).toBe(true);
-      expect(targets.has("jsonSchema")).toBe(true);
     }
   });
 
@@ -203,59 +196,79 @@ describe("Declarative extension: enriched model semantics", () => {
   });
 });
 
-// ─── JSON Schema patch tests ─────────────────────────────────────────
+// ─── Unified JSON Schema tests ───────────────────────────────────────
 
-describe("Declarative extension: JSON Schema field patches", () => {
-  it("collects JSON Schema fields from extension instances", () => {
-    expect(jsonSchemaFields.length).toBeGreaterThan(0);
-  });
-
-  it("produces one field per extension instance (4 extensions = 4 fields)", () => {
-    expect(jsonSchemaFields).toHaveLength(4);
-  });
-
-  it("field names are interpolated from v2Perm", () => {
-    const names = jsonSchemaFields.map((f) => f.fieldName).sort();
-    expect(names).toEqual([
-      "inventory_host_update_id",
-      "inventory_host_view_id",
-      "remediations_remediation_update_id",
-      "remediations_remediation_view_id",
-    ]);
-  });
-
-  it("fields have correct type and format", () => {
-    for (const field of jsonSchemaFields) {
-      expect(field.fieldType).toBe("string");
-      expect(field.format).toBe("uuid");
-      expect(field.required).toBe(true);
-    }
-  });
-
-  it("JSON Schema output includes extension-declared fields on service resources", () => {
+describe("Declarative extension: Unified JSON Schema", () => {
+  it("V1 extensions do not add _id fields for computed permissions", () => {
     const hostSchema = unifiedJsonSchemas["inventory/host"];
     expect(hostSchema).toBeDefined();
-    expect(hostSchema.properties["inventory_host_view_id"]).toBeDefined();
-    expect(hostSchema.properties["inventory_host_view_id"].type).toBe("string");
-    expect(hostSchema.properties["inventory_host_view_id"].format).toBe("uuid");
-    expect(hostSchema.properties["inventory_host_view_id"].source).toBe("extension-declared");
+    expect(hostSchema.properties["inventory_host_view_id"]).toBeUndefined();
+    expect(hostSchema.properties["inventory_host_update_id"]).toBeUndefined();
   });
 
-  it("does not apply other services' jsonSchema_addField rules to inventory/host", () => {
-    const hostSchema = unifiedJsonSchemas["inventory/host"];
-    expect(hostSchema.properties["remediations_remediation_view_id"]).toBeUndefined();
-    expect(hostSchema.properties["remediations_remediation_update_id"]).toBeUndefined();
-  });
-
-  it("extension-declared required fields appear in the required array", () => {
-    const hostSchema = unifiedJsonSchemas["inventory/host"];
-    expect(hostSchema.required).toContain("inventory_host_view_id");
-    expect(hostSchema.required).toContain("inventory_host_update_id");
-  });
-
-  it("relation-derived fields (workspace_id) still present alongside extension fields", () => {
+  it("relation-derived workspace_id is still present from ExactlyOne assignable", () => {
     const hostSchema = unifiedJsonSchemas["inventory/host"];
     expect(hostSchema.properties["workspace_id"]).toBeDefined();
     expect(hostSchema.required).toContain("workspace_id");
+  });
+});
+
+// ─── Generic discovery tests ─────────────────────────────────────────
+
+describe("Generic extension discovery", () => {
+  it("discovers both V1WorkspacePermission and ResourceAnnotation instances", () => {
+    const templateNames = new Set(allDeclared.map((d) => d.templateName));
+    expect(templateNames.has("V1WorkspacePermission")).toBe(true);
+    expect(templateNames.has("ResourceAnnotation")).toBe(true);
+  });
+
+  it("discovers 4 V1 + 2 annotation instances = 6 total", () => {
+    expect(allDeclared).toHaveLength(6);
+  });
+
+  it("each declared extension carries its templateName", () => {
+    for (const d of allDeclared) {
+      expect(d.templateName).toBeTruthy();
+    }
+  });
+});
+
+// ─── ResourceAnnotation tests ────────────────────────────────────────
+
+describe("ResourceAnnotation extensions", () => {
+  it("annotations are collected for inventory/host", () => {
+    expect(annotations.has("inventory/host")).toBe(true);
+  });
+
+  it("inventory/host has feature_flag and retention_days annotations", () => {
+    const entries = annotations.get("inventory/host")!;
+    const keys = entries.map((e) => e.key).sort();
+    expect(keys).toEqual(["feature_flag", "retention_days"]);
+  });
+
+  it("feature_flag annotation has correct value", () => {
+    const entries = annotations.get("inventory/host")!;
+    const flag = entries.find((e) => e.key === "feature_flag");
+    expect(flag).toBeDefined();
+    expect(flag!.value).toBe("staleness_v2");
+  });
+
+  it("retention_days annotation has correct value", () => {
+    const entries = annotations.get("inventory/host")!;
+    const ret = entries.find((e) => e.key === "retention_days");
+    expect(ret).toBeDefined();
+    expect(ret!.value).toBe("90");
+  });
+
+  it("annotations do not affect SpiceDB output", () => {
+    expect(spicedbOutput).not.toContain("feature_flag");
+    expect(spicedbOutput).not.toContain("retention_days");
+    expect(spicedbOutput).not.toContain("staleness_v2");
+  });
+
+  it("V1WorkspacePermission extensions still work unchanged", () => {
+    const role = fullSchema.find((r) => r.name === "role" && r.namespace === "rbac")!;
+    expect(role.relations.some((r) => r.name === "inventory_host_view")).toBe(true);
+    expect(role.relations.some((r) => r.name === "inventory_host_update")).toBe(true);
   });
 });

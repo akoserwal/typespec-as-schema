@@ -36,14 +36,14 @@ async function main() {
   console.error(`Compiling ${resolvedMain}...`);
 
   const { resources, extensions, program } = await compileAndDiscover(resolvedMain);
-  const { fullSchema, jsonSchemaFields } = expandSchemaWithExtensions(
+  const { fullSchema, jsonSchemaFields, annotations } = expandSchemaWithExtensions(
     program,
     resources,
     { strict: !lenientExtensions },
   );
 
   console.error(
-    `Discovered ${resources.length} resources, ${extensions.length} V1WorkspacePermission extensions, expanded to ${fullSchema.length} resource defs.`,
+    `Discovered ${resources.length} resources, ${extensions.length} V1 extensions, expanded to ${fullSchema.length} resource defs.`,
   );
 
   if (emitIR) {
@@ -57,6 +57,7 @@ async function main() {
       fullSchema,
       extensions,
       jsonSchemaFields,
+      annotations,
     );
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     fs.writeFileSync(outPath, JSON.stringify(ir, null, 2) + "\n");

@@ -4,7 +4,8 @@
 
 import "@typespec/json-schema";
 import "../lib/kessel.tsp";
-import "../lib/kessel-extensions.tsp";
+import "../lib/rbac-v1-extensions.tsp";
+import "../lib/service-extensions.tsp";
 import "./rbac.tsp";
 
 using JsonSchema;
@@ -12,8 +13,8 @@ using Kessel;
 
 namespace Inventory;
 
-// ─── Extension Applications ──────────────────────────────────────────
-// Patch rules live on Kessel.V1WorkspacePermission (../lib/kessel-extensions.tsp);
+// ─── RBAC Extension Applications ─────────────────────────────────────
+// Patch rules live on Kessel.V1WorkspacePermission (../lib/rbac-v1-extensions.tsp);
 // the generic emitter applies them to Role, RoleBinding, and Workspace.
 
 /** Maps inventory:hosts:read → inventory_host_view on workspace */
@@ -30,6 +31,24 @@ alias updatePermission = Kessel.V1WorkspacePermission<
   "hosts",
   "write",
   "inventory_host_update"
+>;
+
+// ─── Service Annotations ─────────────────────────────────────────────
+// Metadata annotations are non-RBAC extensions that flow into the IR
+// for downstream consumers (feature flags, retention policy, etc.)
+
+alias hostStalenessFeature = Kessel.ResourceAnnotation<
+  "inventory",
+  "host",
+  "feature_flag",
+  "staleness_v2"
+>;
+
+alias hostRetention = Kessel.ResourceAnnotation<
+  "inventory",
+  "host",
+  "retention_days",
+  "90"
 >;
 
 // ─── Host Data Schema (→ JSONSchema) ─────────────────────────────────

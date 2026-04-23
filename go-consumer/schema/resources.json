@@ -1,6 +1,6 @@
 {
-  "version": "1.1.0",
-  "generatedAt": "2026-04-14T15:28:30.852Z",
+  "version": "1.2.0",
+  "generatedAt": "2026-04-23T11:27:22.370Z",
   "source": "/Users/akoserwa/schema-unify/poc/typespec-as-schema/schema/main.tsp",
   "resources": [
     {
@@ -508,23 +508,17 @@
           "type": "string",
           "format": "uuid",
           "source": "relation workspace: rbac/workspace [ExactlyOne]"
-        },
-        "inventory_host_view_id": {
-          "type": "string",
-          "source": "extension-declared",
-          "format": "uuid"
-        },
-        "inventory_host_update_id": {
-          "type": "string",
-          "source": "extension-declared",
-          "format": "uuid"
         }
       },
       "required": [
-        "workspace_id",
-        "inventory_host_view_id",
-        "inventory_host_update_id"
+        "workspace_id"
       ]
+    }
+  },
+  "annotations": {
+    "inventory/host": {
+      "feature_flag": "staleness_v2",
+      "retention_days": "90"
     }
   }
 }

@@ -8,13 +8,15 @@ import {
   type V1Extension,
 } from "./lib.js";
 import {
-  discoverV1WorkspacePermissionDeclarations,
+  discoverExtensionDeclarations,
   v1ExtensionsFromDeclarations,
+  type DeclaredExtension,
 } from "./declarative-extensions.js";
 
 export async function compileAndDiscover(mainFile: string): Promise<{
   resources: ResourceDef[];
   extensions: V1Extension[];
+  declared: DeclaredExtension[];
   program: Program;
 }> {
   const resolvedMain = path.resolve(mainFile);
@@ -29,7 +31,7 @@ export async function compileAndDiscover(mainFile: string): Promise<{
   }
 
   const { resources } = discoverResources(program);
-  const declared = discoverV1WorkspacePermissionDeclarations(program);
+  const declared = discoverExtensionDeclarations(program);
   const extensions = v1ExtensionsFromDeclarations(declared);
-  return { resources, extensions, program };
+  return { resources, extensions, declared, program };
 }

@@ -43,19 +43,20 @@ The POC validates this against a benchmark covering:
 
 Everything starts with **three layers of `.tsp` files** and a single entrypoint.
 
-### Platform vocabulary (`lib/`) — RBAC-owned
+### Platform vocabulary (`lib/`) — shared
 
 | File | Purpose |
 |------|---------|
 | `lib/kessel.tsp` | Core marker models: `Assignable<Target, Card>`, `Permission<Expr>`, `BoolRelation<Target>`, `Cardinality` enum. Typed slots that the emitter recognizes and converts to SpiceDB relations/permissions. |
-| `lib/kessel-extensions.tsp` | `V1WorkspacePermission<App, Res, Verb, V2>` template. Default string properties encode declarative **patch rules** the generic emitter applies to `rbac/role`, `rbac/role_binding`, `rbac/workspace`, and JSON Schema output. |
+| `lib/rbac-v1-extensions.tsp` | `V1WorkspacePermission<App, Res, Verb, V2>` template. RBAC-specific patch rules the generic emitter applies to `rbac/role`, `rbac/role_binding`, `rbac/workspace`. |
+| `lib/service-extensions.tsp` | `ResourceAnnotation<App, Resource, Key, Value>` template. Non-RBAC extension for attaching arbitrary key-value metadata annotations to resources in the IR. |
 
 ### Service schemas (`schema/`) — service teams own their files
 
 | File | Owner | What it declares |
 |------|-------|-----------------|
 | `schema/rbac.tsp` | RBAC | `Principal`, `Role`, `RoleBinding`, `Workspace` with Kessel relation types. Base resource structure only — no extensions here. |
-| `schema/hbi.tsp` | HBI / Inventory | `Host` model (relations + data), `HostData` model (`@jsonSchema` for built-in JSON Schema emit), two `V1WorkspacePermission` alias invocations. |
+| `schema/hbi.tsp` | HBI / Inventory | `Host` model (relations + data), `HostData` model (`@jsonSchema` for built-in JSON Schema emit), two `V1WorkspacePermission` aliases, two `ResourceAnnotation` aliases (feature flag + retention). |
 | `schema/remediations.tsp` | Remediations | Permissions-only service: two `V1WorkspacePermission` aliases, no resource models. |
 
 ### Entrypoint
@@ -63,7 +64,8 @@ Everything starts with **three layers of `.tsp` files** and a single entrypoint.
 `schema/main.tsp` imports the platform library and all service schemas:
 
 ```typespec
-import "../lib/kessel-extensions.tsp";
+import "../lib/rbac-v1-extensions.tsp";
+import "../lib/service-extensions.tsp";
 import "./rbac.tsp";
 import "./hbi.tsp";
 import "./remediations.tsp";
@@ -98,7 +100,6 @@ RBAC does **not** list every service's permissions here. The `V1WorkspacePermiss
 - On `role`: add bool hierarchy relations + a union permission
 - On `role_binding`: add an intersect permission
 - On `workspace`: add a delegation permission, mark it public, accumulate read-verb permissions into `view_metadata`
-- On JSON Schema: add a `*_id` field for the v2 permission
 
 ### How services use the system
 
@@ -261,7 +262,9 @@ Extension definitions should live close to the schema layer, with emitters actin
 
 ### How it works
 
-The RBAC team defines `V1WorkspacePermission` in `lib/kessel-extensions.tsp` with patch rules using the `{target}_{patchType}` convention:
+Extension templates use the `{target}_{patchType}` naming convention for patch rule properties. The emitter discovers all Kessel-namespace models with this convention automatically.
+
+#### RBAC V1 extension (`lib/rbac-v1-extensions.tsp`)
 
 ```typespec
 model V1WorkspacePermission<App, Res, Verb, V2> {
@@ -276,11 +279,25 @@ model V1WorkspacePermission<App, Res, Verb, V2> {
   workspace_permission: "{v2}=binding->{v2} | parent->{v2}";
   workspace_public: "{v2}";
   workspace_accumulate: "view_metadata=or({v2}),when={verb}==read,public=true";
-  jsonSchema_addField: "{v2}_id=string:uuid,required=true";
 }
 ```
 
-Placeholders `{app}`, `{res}`, `{verb}`, `{v2}` are interpolated from the template params per instance.
+#### Service annotation extension (`lib/service-extensions.tsp`)
+
+```typespec
+model ResourceAnnotation<Application, Resource, Key, Value> {
+  application: Application;
+  resource: Resource;
+  key: Key;
+  value: Value;
+
+  metadata_addAnnotation: "{key}={value}";
+}
+```
+
+This demonstrates a non-RBAC extension that adds metadata to the IR without affecting the SpiceDB schema.
+
+Placeholders like `{app}`, `{res}`, `{key}`, `{value}` are interpolated from the template params per instance. Any param name can be used as a placeholder.
 
 ### Patch type reference
 
@@ -290,6 +307,7 @@ Placeholders `{app}`, `{res}`, `{verb}`, `{v2}` are interpolated from the templa
 | `permission` | `name=body` (body uses `\|` for OR, `&` for AND, `->` for subreference) | Add a computed permission to the target resource |
 | `public` | Comma-separated names | Mark listed permissions as public on target |
 | `accumulate` | `name=op(ref),when=cond,public=bool` | Two-pass: collect `ref` across all instances where `cond` holds, merge with `op` |
+| `addAnnotation` | `key=value` | Add a key-value annotation to the IR for the specified resource |
 | `addField` | `name=type:format,required=bool` | Add a field to JSON Schema output for service resources (scoped by extension `application` and optional `resource`) |
 
 ### Two-pass application
@@ -315,16 +333,16 @@ Mixed `&` and `|` without grouping is not modeled.
 
 **Strengths:**
 
-- RBAC owns extension rules in `.tsp` — no emitter edits for new patterns expressible in the existing patch vocabulary
+- Domain teams own extension rules in `.tsp` — no emitter edits for new patterns expressible in the existing patch vocabulary
 - Cross-instance patterns (e.g. `view_metadata`) are data, not one-off code
-- Extension-driven JSON Schema fields via `jsonSchema_addField`
-- One expanded graph feeds all emitters (SpiceDB, IR, metadata, unified JSON Schema)
+- Multiple extension templates coexist: RBAC and non-RBAC extensions are discovered and processed through the same generic pipeline
+- One expanded graph feeds all emitters (SpiceDB, IR, metadata, annotations, unified JSON Schema)
 
 **Weaknesses:**
 
 - TypeSpec does not validate patch string semantics at compile time (strict runtime checks in TS close part of the gap)
 - Interpolation is evaluated in TypeScript, not by the TypeSpec checker
-- New patch *kinds* (new `{target}_{patchType}` syntax) require `src/` changes — the vocabulary of effects is RBAC-authored, but the implementation of each kind is TypeScript
+- New patch *kinds* (new `{target}_{patchType}` syntax) require `src/` changes — the vocabulary of effects is template-authored, but the implementation of each kind is TypeScript
 - `ResourceDef` is shaped for authorization projection, not a fully neutral domain model independent of Zanzibar vocabulary
 
 ---
@@ -390,7 +408,7 @@ properties:
 
 ```json
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "resources": [ /* full expanded ResourceDef[] */ ],
   "extensions": [
     { "application": "inventory", "resource": "hosts", "verb": "read", "v2Perm": "inventory_host_view" }
@@ -403,11 +421,15 @@ properties:
   "jsonSchemas": {
     "inventory/host": {
       "properties": {
-        "workspace_id": { "type": "string", "format": "uuid" },
-        "inventory_host_view_id": { "type": "string", "format": "uuid" },
-        "inventory_host_update_id": { "type": "string", "format": "uuid" }
+        "workspace_id": { "type": "string", "format": "uuid" }
       },
-      "required": ["workspace_id", "inventory_host_view_id", "inventory_host_update_id"]
+      "required": ["workspace_id"]
+    }
+  },
+  "annotations": {
+    "inventory/host": {
+      "feature_flag": "staleness_v2",
+      "retention_days": "90"
     }
   }
 }
@@ -435,7 +457,6 @@ alias viewPermission = Kessel.V1WorkspacePermission<"inventory", "hosts", "read"
 | `workspace_permission` | `inventory_host_view=binding->inventory_host_view \| parent->inventory_host_view` | 1 delegation permission on `rbac/workspace` |
 | `workspace_public` | `inventory_host_view` | Marks as public |
 | `workspace_accumulate` | `view_metadata=or(inventory_host_view),when=read==read` | Condition matches → collected for `view_metadata` OR merge |
-| `jsonSchema_addField` | `inventory_host_view_id=string:uuid,required=true` | 1 field added to `inventory/host` unified JSON Schema |
 
 After all extensions are processed, **Pass 2** merges:
 
@@ -477,6 +498,7 @@ The **in-memory model available to Go** is the IR, not the live TypeSpec compile
 | `spicedb` | Pre-rendered Zed string |
 | `metadata` | Per-application permission and resource lists |
 | `jsonSchemas` | Unified JSON Schema fragments for non-`rbac` resources |
+| `annotations` | Key-value metadata from `ResourceAnnotation` extensions, keyed by resource |
 
 ### Limitations
 
@@ -494,37 +516,48 @@ The **in-memory model available to Go** is the IR, not the live TypeSpec compile
 
 | Layer | Location | Owner | Edits for new service? |
 |-------|----------|-------|----------------------|
-| Platform vocabulary | `lib/` | RBAC | No |
+| Platform vocabulary | `lib/kessel.tsp` | Platform / RBAC | No |
+| Extension templates | `lib/rbac-v1-extensions.tsp`, `lib/service-extensions.tsp` | Domain teams | Only to add new templates |
 | Service schemas | `schema/` | Service teams | Yes — new `.tsp` file + import |
 | Interpreter / emitter | `src/` | Platform tooling | No (for standard patterns) |
 
 ### The central tension: schema vs interpreter
 
-The **marker model and default patch strings** are RBAC-owned schema in `lib/kessel-extensions.tsp`. The **generic interpreter** in `src/` parses patch syntax, interpolates placeholders, merges relations, and emits artifacts. This split is intentional.
+**Extension templates** define patch rules in `.tsp` files. The **generic interpreter** in `src/` discovers templates by convention (`{target}_{patchType}` properties in Kessel-namespace models), parses patch syntax, interpolates placeholders, and emits artifacts. This split is intentional.
 
-**Where it works well:** Service teams do not edit `lib.ts` or `declarative-extensions.ts` to add a standard permission. They add an alias in their `schema/` file.
+**Where it works well:** Service teams do not edit `lib.ts` or `declarative-extensions.ts` to add a standard permission or annotation. They add an alias in their `schema/` file.
 
-**Where the tension shows:** Adding a new patch *kind* (a new `{target}_{patchType}` convention or new semantics) requires changes in `declarative-extensions.ts`, not only `.tsp`. The vocabulary of effects is RBAC-authored, but the implementation of each kind is TypeScript.
+**Where the tension shows:** Adding a new patch *kind* (a new `patchType` like `addAnnotation` or `addField`) requires changes in `declarative-extensions.ts`, not only `.tsp`. The vocabulary of effects is template-authored, but the implementation of each kind is TypeScript.
+
+### Extension flexibility matrix
+
+| Change type | What to edit | `src/` changes? |
+|------------|-------------|-----------------|
+| New instance of existing template (e.g., new V1 permission) | `schema/*.tsp` only | No |
+| New extension template using existing patch types | New `lib/*.tsp` file | No |
+| New patch type (new `patchType` semantics) | `lib/*.tsp` + `src/declarative-extensions.ts` | Yes |
+| New output format from existing IR | `src/` emitter only | Yes |
+
+The architecture was generalized to auto-discover all extension templates in the Kessel namespace, not just `V1WorkspacePermission`. Two templates are demonstrated: `V1WorkspacePermission` (RBAC) and `ResourceAnnotation` (service metadata).
 
 ### Extension decoupling from output formatting
 
-After discovery, expansion produces an enriched `ResourceDef[]` and JSON-schema field rules. Emitters then project that single graph into SpiceDB text, unified JSON Schema, metadata, and IR. So **one expanded graph feeds all outputs** — the SpiceDB emitter is not the only consumer.
+After discovery, expansion produces an enriched `ResourceDef[]`, JSON-schema field rules, and annotation maps. Emitters then project that single graph into SpiceDB text, unified JSON Schema, metadata, annotations, and IR. So **one expanded graph feeds all outputs** — the SpiceDB emitter is not the only consumer.
 
 What is *not* fully decoupled:
 
-- **Patch DSL + applicator are TypeScript** — RBAC defines `V1WorkspacePermission` in `.tsp`, but new patch kinds need `src/` changes
+- **Patch DSL + applicator are TypeScript** — templates define rules in `.tsp`, but new patch kinds need `src/` changes
 - **`ResourceDef` is shaped for authorization** — relations map cleanly to SpiceDB-style names/bodies, not a fully neutral domain model
-- **`jsonSchema_addField` is output-oriented** — it declares extra JSON Schema fields explicitly rather than deriving from a single abstract model
 
 ### Writable relationships and JSON Schema
 
-Extensions add bool relations and permissions to RBAC types (SpiceDB-relevant structure). `generateUnifiedJsonSchemas` **skips** `namespace === "rbac"` — it focuses on service resources (e.g. `inventory/host`) and adds `_id` fields from `ExactlyOne` assignable relations plus extension-declared fields.
+The unified JSON Schema only includes `_id` fields for assignable relations with `ExactlyOne` cardinality (e.g., `workspace_id` on `inventory/host`). Computed permissions and non-assignable relations do not generate JSON Schema fields.
 
-New writable bool slots on `role` affect SpiceDB and the internal `ResourceDef` for `rbac/role`, but do **not** automatically appear in a unified JSON Schema for role. Extending the emitter to include `rbac/*` definitions is a straightforward follow-up, not blocked by TypeSpec.
+`generateUnifiedJsonSchemas` **skips** `namespace === "rbac"` — it focuses on service resources (e.g. `inventory/host`).
 
 ### Future directions for advanced extensions
 
-- **Multiple marker templates** in `lib/` (RBAC-owned), each with its own patch properties; emitter discovers a registry of template names
+- **Additional patch types** for Features, Cost, ACM, or other domains — each new kind needs a `src/` change to the applicator
 - **Explicit plugin entrypoints** via `tspconfig.yaml` or codegen, not implicit `schema/**/*.ts` discovery
 - **Heavier IR + consumer-side logic** — emit a rich JSON graph and let advanced products interpret extension metadata in Go without extending the SpiceDB emitter
 
@@ -587,9 +620,10 @@ The emitter automatically:
 
 ```
 poc/typespec-as-schema/
-├── lib/                         Platform vocabulary (RBAC-owned)
+├── lib/                         Platform vocabulary + extension templates
 │   ├── kessel.tsp                 Assignable, Permission, BoolRelation, Cardinality
-│   └── kessel-extensions.tsp      V1WorkspacePermission template + patch rules
+│   ├── rbac-v1-extensions.tsp     V1WorkspacePermission template + RBAC patch rules
+│   └── service-extensions.tsp     ResourceAnnotation template for service metadata
 │
 ├── schema/                      Service schemas (service teams own their files)
 │   ├── main.tsp                   Entrypoint — imports all service schemas
@@ -641,7 +675,6 @@ poc/typespec-as-schema/
 - **Node.js in CI** for `tsp` + `tsx`; Go consumer runtime needs no Node
 - **Emitter maintenance** — new extension patch kinds may require `src/` changes
 - **Patch DSL** — string rules are not validated by the TypeSpec checker; strict runtime checks close part of the gap
-- **Unified JSON Schema** — `jsonSchema_addField` is scoped by extension `application` (and optional `resource` slug). Use `--lenient-extensions` to skip throwing on malformed patch strings (default is strict)
 - **Two JSON Schema paths** — built-in `@jsonSchema` emit vs custom unified schema. Consumers must know which is authoritative for their use case
 
 
