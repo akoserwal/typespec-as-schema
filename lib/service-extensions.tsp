@@ -1,20 +1,12 @@
-// Service Extension Library
-// Declarative extension templates for service-level metadata and annotations.
-// Unlike RBAC extensions, these do not affect the SpiceDB schema — they add
-// metadata to the IR that downstream consumers (Go runtime, dashboards, etc.)
-// can interpret.
+// Service Annotation Template
+// Service schemas declare ResourceAnnotation aliases to attach metadata.
+// Annotations flow into the IR for downstream consumers (feature flags, etc.)
+// They do not affect SpiceDB output.
 //
-// Patch-rule property naming convention:
-//   {target}_{patchType}
-//
-//   target:    metadata
-//   patchType: addAnnotation
-//
-// Patch-rule syntax:
-//   addAnnotation:  key=value
-//                   Adds a key-value annotation to the IR for the specified resource.
-//
-// Placeholders: all param names are available as {paramName} in patch rules.
+// Usage:
+//   alias hostFlag = Kessel.ResourceAnnotation<
+//     "inventory", "host", "feature_flag", "staleness_v2"
+//   >;
 
 import "./kessel.tsp";
 
@@ -30,6 +22,4 @@ model ResourceAnnotation<
   resource: Resource;
   key: Key;
   value: Value;
-
-  metadata_addAnnotation: "{key}={value}";
 }

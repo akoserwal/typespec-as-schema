@@ -2,30 +2,70 @@
 
 Prototype exploring [TypeSpec](https://typespec.io/) as a unified schema representation for Kessel (same RBAC + HBI benchmark as sibling POCs).
 
-**Layout (as planned — parity with `ts-as-schema`):**
+**Layout:**
 
 | Folder | Role |
 |--------|------|
-| **`schema/`** | **Adopter + composition:** `main.tsp` entrypoint and service modules only (`rbac.tsp`, `hbi.tsp`, …). No platform vocabulary here. |
-| **`lib/`** | **Platform vocabulary:** `kessel.tsp` (Assignable, Permission, …) and `kessel-extensions.tsp` (`V1WorkspacePermission` + patch rules). |
+| **`schema/`** | **Adopter + composition:** `main.tsp` entrypoint and service modules (`rbac.tsp`, `hbi.tsp`, `remediations.tsp`). No platform vocabulary here. |
+| **`lib/`** | **Platform vocabulary:** `kessel.tsp` (Assignable, Permission, ...), `rbac-v1-extensions.tsp` (V1WorkspacePermission params), `service-extensions.tsp` (ResourceAnnotation params). |
 | **`src/`** | **Interpreter / tooling:** TypeScript that walks the TypeSpec program and emits SpiceDB, IR, metadata, unified JSON Schema. |
 | **`samples/`** | Frozen **`demo-output.txt`** from `make samples` or `make demo` (review without running Node). |
 | **`go-consumer/`** | Optional Go binary that embeds emitted IR (`//go:embed`). |
 | **`test/`** | Vitest (imports from `src/`). |
+| **`docs/`** | Design documents, review analysis, simplification changelog. |
 
-**One-line map:** Authors extend **`schema/`** (and import **`lib/`** for Kessel types); all codegen lives in **`src/`**. Evaluators run **`make demo`** or **`make run`** (alias) for a console tour; **`make samples`** refreshes checked-in sample output.
+**One-line map:** Authors extend **`schema/`** (and import **`lib/`** for Kessel types); all codegen lives in **`src/`**. Evaluators run **`make demo`** or **`make run`** for a console tour; **`make samples`** refreshes checked-in sample output.
 
 ## Quick Start
 
 ```bash
 npm install
-make demo              # or: make run — SpiceDB + metadata + JSON Schema fragment on stdout
+make demo              # or: make run -- SpiceDB + metadata + JSON Schema fragment on stdout
 make samples           # regenerate samples/demo-output.txt (same content as demo + file header)
 # or stepwise:
 npx tsp compile schema/main.tsp
 npx tsx src/spicedb-emitter.ts schema/main.tsp
-# Optional: npx tsx src/spicedb-emitter.ts schema/main.tsp --lenient-extensions
-# (skip throwing on malformed declarative patch strings; default is strict)
+```
+
+## End-to-End Flow
+
+```
+ .tsp files                    src/                          Outputs
+┌─────────────┐       ┌──────────────────┐
+│ lib/        │       │                  │
+│  kessel.tsp │       │  TypeSpec        │
+│  rbac-v1-.. │──┐    │  Compiler        │
+│  service-.. │  │    │  (compile)       │       ┌──────────────────┐
+├─────────────┤  │    └────────┬─────────┘       │ SpiceDB .zed     │
+│ schema/     │  │             │                 │ (default)        │
+│  main.tsp   │──┤        Program                ├──────────────────┤
+│  rbac.tsp   │  │        (type graph)           │ Metadata JSON    │
+│  hbi.tsp    │  │             │                 │ (--metadata)     │
+│  remed..tsp │──┘    ┌────────┴─────────┐       ├──────────────────┤
+│             │       │                  │       │ Unified JSON     │
+└─────────────┘       │  Discover        │       │ Schema           │
+                      │  ├ resources     │       │ (--unified-      │
+                      │  │  (lib.ts)     │       │  jsonschema)     │
+                      │  ├ v1 perms      │       ├──────────────────┤
+                      │  │  (expand.ts)  │       │ IR JSON          │
+                      │  └ annotations   │       │ (--ir)           │
+                      │     (expand.ts)  │       └────────▲─────────┘
+                      └────────┬─────────┘                │
+                               │                          │
+                      ┌────────┴─────────┐       ┌────────┴─────────┐
+                      │                  │       │                  │
+                      │  Expand          │       │  Generate        │
+                      │  (expand.ts)     │──────▶│  (lib.ts)        │
+                      │                  │       │                  │
+                      │  For each V1ext: │       │ generateSpiceDB  │
+                      │  ┌─────────────┐ │       │ generateMetadata │
+                      │  │Role: 4 bool │ │       │ generateUnified  │
+                      │  │  + 1 perm   │ │       │   JsonSchemas    │
+                      │  │RB: 1 perm   │ │       │ generateIR       │
+                      │  │WS: 1 perm   │ │       └──────────────────┘
+                      │  │+ view_meta  │ │
+                      │  └─────────────┘ │
+                      └──────────────────┘
 ```
 
 ## Architecture
@@ -33,23 +73,22 @@ npx tsx src/spicedb-emitter.ts schema/main.tsp
 ```mermaid
 flowchart TB
   subgraph input ["Input (.tsp files)"]
-    lib["lib/kessel.tsp\nlib/kessel-extensions.tsp"]
+    lib["lib/kessel.tsp\nlib/rbac-v1-extensions.tsp\nlib/service-extensions.tsp"]
     rbac["schema/rbac.tsp"]
     hbi["schema/hbi.tsp"]
     rem["schema/remediations.tsp"]
     main["schema/main.tsp"]
   end
 
-  subgraph stage1 ["1. Compile and Discover (compile-and-discover.ts)"]
-    tsc["TypeSpec Compiler\n— compile with noEmit —"]
-    dr["discoverResources\n→ ResourceDef[]"]
-    dv1["discoverV1WorkspacePermission\nDeclarations → DeclaredExtension[]"]
-    v1e["v1ExtensionsFromDeclarations\n→ V1Extension[]"]
+  subgraph stage1 ["1. Compile and Discover"]
+    tsc["TypeSpec Compiler\n-- compile with noEmit --"]
+    dr["discoverResources\n(lib.ts)\n-> ResourceDef[]"]
+    dv1["discoverV1Permissions\n(expand.ts)\n-> V1Extension[]"]
+    da["discoverAnnotations\n(expand.ts)\n-> Map<string, AnnotationEntry[]>"]
   end
 
-  subgraph stage2 ["2. Expand (pipeline.ts)"]
-    expand["expandSchemaWithExtensions"]
-    apply["applyDeclaredPatches\n— merge onto role, role_binding, workspace —"]
+  subgraph stage2 ["2. Expand (expand.ts)"]
+    expand["expandV1Permissions\n-- explicit mutations on\nrole, role_binding, workspace --"]
   end
 
   subgraph stage3 ["3. Emit (spicedb-emitter.ts)"]
@@ -60,7 +99,7 @@ flowchart TB
   end
 
   subgraph builtin ["Built-in Emitter"]
-    jsonschema["@typespec/json-schema\n→ tsp-output/json-schema/"]
+    jsonschema["@typespec/json-schema\n-> tsp-output/json-schema/"]
   end
 
   lib --> main
@@ -70,51 +109,55 @@ flowchart TB
   main --> tsc
   tsc --> dr
   tsc --> dv1
-  dv1 --> v1e
+  tsc --> da
   dr --> expand
   dv1 --> expand
-  expand --> apply
-  apply --> spicedb
-  apply --> ir
-  apply --> meta
-  apply --> ujson
-  v1e --> ir
-  v1e --> meta
+  expand --> spicedb
+  expand --> ir
+  expand --> meta
+  expand --> ujson
+  da --> ir
   main --> jsonschema
 ```
 
 ### Pipeline
 
-Services register permissions by declaring aliases of **`Kessel.V1WorkspacePermission<App, Res, Verb, V2>`** in their `schema/*.tsp` file. Each alias carries four parameters (application, resource, verb, v2 permission name) and inherits declarative patch rules from the template in `lib/kessel-extensions.tsp`.
+Services register permissions by declaring aliases of **`Kessel.V1WorkspacePermission<App, Res, Verb, V2>`** in their `schema/*.tsp` file. Each alias carries four parameters (application, resource, verb, v2 permission name). Non-RBAC metadata is declared via **`Kessel.ResourceAnnotation<App, Res, Key, Value>`** from `lib/service-extensions.tsp`.
 
 The emitter pipeline has three stages:
 
-1. **Compile and discover** (`src/compile-and-discover.ts`) — compiles `schema/main.tsp` into a typed program, discovers base resource models (`discoverResources`), and discovers all `V1WorkspacePermission` instances (`discoverV1WorkspacePermissionDeclarations`) in a single pass.
-2. **Expand** (`src/pipeline.ts`) — `expandSchemaWithExtensions` re-runs V1 discovery on the program and applies declarative patches (`applyDeclaredPatches`) to merge extension-generated relations and permissions onto `rbac/role`, `rbac/role_binding`, and `rbac/workspace`.
-3. **Emit** (`src/spicedb-emitter.ts`) — produces SpiceDB/Zed text (default), IR JSON (`--ir`), per-service metadata (`--metadata`), or unified JSON Schema (`--unified-jsonschema`).
+1. **Compile and Discover** -- The TypeSpec compiler parses `schema/main.tsp` into a typed program graph. `discoverResources` (in `src/lib.ts`) walks the graph to extract base resource models as `ResourceDef[]`. `discoverV1Permissions` and `discoverAnnotations` (in `src/expand.ts`) find all extension template instances.
 
-All patch-rule parsing and application lives in `src/declarative-extensions.ts`. The emitter is extension-agnostic: it knows how to parse patch-rule syntax (`boolRelations`, `permission`, `public`, `accumulate`, `addField`) but has no knowledge of specific extension patterns.
+2. **Expand** (`src/expand.ts`) -- `expandV1Permissions` takes base resources and V1 extensions. For each extension, it makes 7 explicit mutations:
+   - **Role:** 4 bool relations for the permission hierarchy (`{app}_any_any`, `{app}_{res}_any`, `{app}_any_{verb}`, `{app}_{res}_{verb}`)
+   - **Role:** 1 computed permission as a union of the hierarchy levels plus `any_any_any`
+   - **RoleBinding:** 1 intersection permission (`subject & t_granted->{v2}`)
+   - **Workspace:** 1 union permission (`t_binding->{v2} + t_parent->{v2}`)
+   - After all extensions, a `view_metadata` permission is added to workspace as a union of all read-verb permissions.
 
-### Testing without a TypeSpec program
+3. **Emit** (`src/spicedb-emitter.ts`) -- produces SpiceDB/Zed text (default), IR JSON (`--ir`), per-service metadata (`--metadata`), or unified JSON Schema (`--unified-jsonschema`).
 
-Unit tests that need to exercise patch application without compiling `.tsp` files use `declaredExtensionsFromV1Extensions` to build `DeclaredExtension[]` from plain `V1Extension` objects. These rely on the frozen `V1_WORKSPACE_PERMISSION_TEMPLATE_RULES` array, which must stay in sync with the template defaults in `lib/kessel-extensions.tsp`. The drift guard at `test/unit/template-rules-drift.test.ts` compiles a minimal fixture and fails if the two diverge.
+### Source Files
 
-### Debug: discovery warnings
+```
+src/
+  lib.ts              # Types (ResourceDef, RelationDef, RelationBody, V1Extension),
+                      # resource discovery, SpiceDB/JSON/metadata/IR generators
+  expand.ts           # V1 permission discovery, annotation discovery,
+                      # explicit permission expansion
+  spicedb-emitter.ts  # CLI entry point: compile -> discover -> expand -> emit
+```
 
-If extension discovery skips a source node (checker error), set **`DISCOVER_DEBUG=1`** or **`TYPESPEC_DISCOVER_DEBUG=1`** to log `console.warn` details. Default behavior remains non-throwing for those nodes.
+### Permission Expressions
 
-### Permission expressions
+The emitter's `parsePermissionExpr` maps `Permission<"...">` **string** bodies to an internal `RelationBody` tree. Only this **subset** is supported (enough for the benchmark):
 
-The emitter’s `parsePermissionExpr` maps `Permission<"...">` **string** bodies to an internal `RelationBody` tree. Only this **subset** is supported (enough for the benchmark and declarative patches):
+- **Single reference:** `binding`, `subject`, `any_any_any`, ... -> `ref`
+- **Subreference:** `binding->granted` or dot form `a.b` -> `subref` with `t_`-prefixed relation name
+- **Union:** operands joined by **` | `** or **` + `** -> `or` (each operand may use `name->sub`)
+- **Intersection:** operands joined by **` & `** -> `and` (same `->` rule)
 
-- **Single reference:** `binding`, `subject`, `any_any_any`, … → `ref`
-- **Subreference:** `binding->granted` or `t_binding->granted` style (dot form without spaces: `a.b`) → `subref` with `t_`-prefixed relation name where applicable
-- **Union:** operands joined by **` | `** or **` + `** → `or` (each operand may use `name->sub` for subref)
-- **Intersection:** operands joined by **` & `** → `and` (same `->` rule as union members)
-
-Expressions mixing `&` and `|` on one line without grouping, or other Zed features, are **not** modeled; extend [`src/lib.ts`](src/lib.ts) `parsePermissionExpr` if you need more.
-
-### How to validate end-to-end
+### How to Validate End-to-End
 
 From `poc/typespec-as-schema/`:
 
@@ -138,7 +181,7 @@ From `poc/typespec-as-schema/`:
    npx vitest run
    ```
 
-   Covers declarative extensions, SpiceDB output, unified JSON Schema scoping, strict/lenient patches, and template-rule drift vs `kessel-extensions.tsp`.
+   Runs 102 tests covering: V1 permission discovery, expansion semantics, SpiceDB output correctness (vs golden reference), unified JSON Schema scoping, annotation collection, metadata output, and structural conventions.
 
 4. **Console tour (optional)**
 
@@ -146,7 +189,7 @@ From `poc/typespec-as-schema/`:
    make demo
    ```
 
-   or `make run` — SpiceDB snippet + metadata + unified JSON Schema fragment on stdout.
+   or `make run` -- SpiceDB snippet + metadata + unified JSON Schema fragment on stdout.
 
 5. **IR + Go path (no Node at runtime)**
 
@@ -158,12 +201,7 @@ From `poc/typespec-as-schema/`:
 
    Confirms embedded IR loads and the Go binary prints resources/extensions.
 
-6. **Strict vs lenient (regression check)**
-
-   - Default: `npx tsx src/spicedb-emitter.ts schema/main.tsp` should succeed on the benchmark schema.
-   - If you intentionally break a patch string in `lib/kessel-extensions.tsp`, default should throw; `npx tsx src/spicedb-emitter.ts schema/main.tsp --lenient-extensions` should not throw (may skip bad rules).
-
-7. **Optional: refresh checked-in samples**
+6. **Optional: refresh checked-in samples**
 
    ```bash
    make samples
@@ -171,48 +209,55 @@ From `poc/typespec-as-schema/`:
 
    Regenerates `samples/demo-output.txt` for reviewers; diff if you care about golden output.
 
-## Risks and tradeoffs
-
-- **Node.js in CI** for `tsp` + `tsx`; Go consumer runtime needs no Node.
-- **Emitter maintenance** — new extension *patch kinds* may require `src/` changes.
-- **Patch DSL** — string rules are not fully validated by the TypeSpec checker.
-- **Unified JSON Schema** — `jsonSchema_addField` is scoped by extension `application` (and optional `resource` slug vs model name). Omit `application` on hand-built `JsonSchemaExtraField` entries to apply everywhere (legacy). Use `--lenient-extensions` to skip throwing on malformed patch strings (default is strict).
-
-## File structure
+## File Structure
 
 ```
 lib/
-  kessel.tsp
-  kessel-extensions.tsp
+  kessel.tsp                # Platform types: Assignable, BoolRelation, Permission, Cardinality
+  rbac-v1-extensions.tsp    # V1WorkspacePermission<App, Res, Verb, V2> template
+  service-extensions.tsp    # ResourceAnnotation<App, Res, Key, Value> template
 schema/
-  main.tsp
-  rbac.tsp
-  hbi.tsp
-  remediations.tsp
+  main.tsp                  # Entrypoint -- imports all service modules
+  rbac.tsp                  # RBAC core: Principal, Role, RoleBinding, Workspace
+  hbi.tsp                   # HBI: Host resource with workspace relation + permissions
+  remediations.tsp          # Remediations: permissions-only (no resource definition)
 src/
-  spicedb-emitter.ts
-  compile-and-discover.ts
-  lib.ts
-  pipeline.ts
-  declarative-extensions.ts
+  lib.ts                    # Types, resource discovery, all output generators
+  expand.ts                 # Extension discovery + explicit V1 permission expansion
+  spicedb-emitter.ts        # CLI entry point
+docs/
+  Simplification-Changelog.md       # Before/after architecture, data flow
+  TypeSpec-v2-Review-and-Simplification.md  # V2 review + simplification proposals
+  Karpathy-Cross-POC-Complexity-Review.md   # Cross-POC complexity analysis
+  TypeSpec-POC-Design-Document.md    # Original design document
 samples/
-  README.md
   demo-output.txt
 go-consumer/
 test/
+  unit/                     # Pure unit tests (no TypeSpec compilation)
+  integration/              # Full pipeline tests (compile + discover + expand + emit)
 tspconfig.yaml
 Makefile
 ```
 
-## Benchmark highlights
+## Benchmark Highlights
 
 | Feature | TypeSpec |
 |---------|----------|
 | Resource + relation modeling | Y |
 | Zanzibar-style `Permission<"expr">` | Y |
 | Data fields + JSON Schema | Y |
-| Cooperative extensions | Y (declarative template + `src/` applicator) |
-| SpiceDB / Zed | Y |
+| Cooperative extensions | Y (explicit expansion in `expand.ts`) |
+| SpiceDB / Zed output | Y |
+| Metadata per service | Y |
+| IR for Go consumer | Y |
+| Annotations (non-RBAC metadata) | Y |
+
+## Risks and Tradeoffs
+
+- **Node.js in CI** for `tsp` + `tsx`; Go consumer runtime needs no Node.
+- **Emitter maintenance** -- new extension types require adding logic to `src/expand.ts`.
+- **Single expansion function** -- `expandV1Permissions` is explicit and readable, but adding a second extension template means writing a second expansion function (a deliberate tradeoff: explicit code over a generic framework).
 
 ## Refresh `samples/demo-output.txt`
 

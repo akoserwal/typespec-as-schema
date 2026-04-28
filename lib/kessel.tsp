@@ -12,7 +12,6 @@ enum Cardinality {
   ExactlyOne,
   AtLeastOne,
   Any,
-  All,
 }
 
 // ─── Relation Types ──────────────────────────────────────────────────

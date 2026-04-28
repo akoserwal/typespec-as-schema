@@ -4,15 +4,7 @@ import {
   type V1Extension,
   type RelationBody,
 } from "../../src/lib.js";
-import {
-  applyDeclaredPatches,
-  declaredExtensionsFromV1Extensions,
-} from "../../src/declarative-extensions.js";
-
-function expandV1(base: ResourceDef[], exts: V1Extension[]): ResourceDef[] {
-  return applyDeclaredPatches(base, declaredExtensionsFromV1Extensions(exts))
-    .resources;
-}
+import { expandV1Permissions } from "../../src/expand.js";
 
 function makeBaseRbacResources(): ResourceDef[] {
   return [
@@ -79,10 +71,10 @@ function findRelation(resource: ResourceDef, name: string) {
   return resource.relations.find((r) => r.name === name);
 }
 
-describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
+describe("V1 workspace permission expansion (expandV1Permissions)", () => {
   describe("Role wildcard relations", () => {
     it("adds four wildcard bool relations per extension to role", () => {
-      const result = expandV1(makeBaseRbacResources(), [inventoryViewExt]);
+      const result = expandV1Permissions(makeBaseRbacResources(), [inventoryViewExt]);
       const role = findResource(result, "rbac", "role")!;
 
       const wildcards = ["inventory_any_any", "inventory_hosts_any", "inventory_any_read", "inventory_hosts_read"];
@@ -95,7 +87,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
     });
 
     it("adds computed v2 permission on role ORing wildcards and any_any_any", () => {
-      const result = expandV1(makeBaseRbacResources(), [inventoryViewExt]);
+      const result = expandV1Permissions(makeBaseRbacResources(), [inventoryViewExt]);
       const role = findResource(result, "rbac", "role")!;
       const perm = findRelation(role, "inventory_host_view");
       expect(perm).toBeDefined();
@@ -111,7 +103,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
     });
 
     it("uses 'any' naming for wildcards, not 'all'", () => {
-      const result = expandV1(makeBaseRbacResources(), [inventoryViewExt]);
+      const result = expandV1Permissions(makeBaseRbacResources(), [inventoryViewExt]);
       const role = findResource(result, "rbac", "role")!;
       const relNames = role.relations.map((r) => r.name);
       expect(relNames).not.toContain("inventory_all_all");
@@ -121,7 +113,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
 
   describe("RoleBinding intersection permissions", () => {
     it("adds intersection permission: subject & t_granted->v2Perm", () => {
-      const result = expandV1(makeBaseRbacResources(), [inventoryViewExt]);
+      const result = expandV1Permissions(makeBaseRbacResources(), [inventoryViewExt]);
       const rb = findResource(result, "rbac", "role_binding")!;
       const perm = findRelation(rb, "inventory_host_view");
       expect(perm).toBeDefined();
@@ -135,7 +127,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
 
   describe("Workspace union permissions", () => {
     it("adds union permission: t_binding->v2Perm + t_parent->v2Perm", () => {
-      const result = expandV1(makeBaseRbacResources(), [inventoryViewExt]);
+      const result = expandV1Permissions(makeBaseRbacResources(), [inventoryViewExt]);
       const ws = findResource(result, "rbac", "workspace")!;
       const perm = findRelation(ws, "inventory_host_view");
       expect(perm).toBeDefined();
@@ -147,7 +139,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
     });
 
     it("uses 'binding' naming, not 'user_grant'", () => {
-      const result = expandV1(makeBaseRbacResources(), [inventoryViewExt]);
+      const result = expandV1Permissions(makeBaseRbacResources(), [inventoryViewExt]);
       const ws = findResource(result, "rbac", "workspace")!;
       const relNames = ws.relations.map((r) => r.name);
       expect(relNames).toContain("binding");
@@ -158,7 +150,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
   describe("view_metadata accumulation", () => {
     it("generates view_metadata on workspace from read-verb extensions only", () => {
       const extensions = [inventoryViewExt, inventoryUpdateExt, remediationsViewExt, remediationsUpdateExt];
-      const result = expandV1(makeBaseRbacResources(), extensions);
+      const result = expandV1Permissions(makeBaseRbacResources(), extensions);
       const ws = findResource(result, "rbac", "workspace")!;
       const viewMeta = findRelation(ws, "view_metadata");
 
@@ -174,7 +166,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
     });
 
     it("does not generate view_metadata when no read-verb extensions exist", () => {
-      const result = expandV1(makeBaseRbacResources(), [inventoryUpdateExt]);
+      const result = expandV1Permissions(makeBaseRbacResources(), [inventoryUpdateExt]);
       const ws = findResource(result, "rbac", "workspace")!;
       const viewMeta = findRelation(ws, "view_metadata");
       expect(viewMeta).toBeUndefined();
@@ -184,7 +176,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
   describe("G4: Cooperative extensions — idempotency", () => {
     it("does not produce duplicate wildcard relations when extensions share an application", () => {
       const extensions = [inventoryViewExt, inventoryUpdateExt];
-      const result = expandV1(makeBaseRbacResources(), extensions);
+      const result = expandV1Permissions(makeBaseRbacResources(), extensions);
       const role = findResource(result, "rbac", "role")!;
 
       const appAdminCount = role.relations.filter((r) => r.name === "inventory_any_any").length;
@@ -198,7 +190,7 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
   describe("Multi-service expansion", () => {
     it("expands both inventory and remediations extensions onto RBAC types", () => {
       const extensions = [inventoryViewExt, inventoryUpdateExt, remediationsViewExt, remediationsUpdateExt];
-      const result = expandV1(makeBaseRbacResources(), extensions);
+      const result = expandV1Permissions(makeBaseRbacResources(), extensions);
 
       const role = findResource(result, "rbac", "role")!;
       expect(findRelation(role, "inventory_host_view")).toBeDefined();
@@ -228,12 +220,12 @@ describe("V1 workspace permission expansion (applyDeclaredPatches)", () => {
           ],
         },
       ];
-      const result = expandV1(resources, []);
+      const result = expandV1Permissions(resources, []);
       expect(findResource(result, "rbac", "principal")).toBeDefined();
     });
 
     it("does not duplicate principal if already present", () => {
-      const result = expandV1(makeBaseRbacResources(), []);
+      const result = expandV1Permissions(makeBaseRbacResources(), []);
       const principals = result.filter((r) => r.name === "principal" && r.namespace === "rbac");
       expect(principals.length).toBe(1);
     });

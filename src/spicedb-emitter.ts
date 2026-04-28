@@ -1,80 +1,69 @@
-// SpiceDB/Zed Schema Emitter for TypeSpec
-// Walks the compiled TypeSpec type graph to produce SpiceDB schema output.
-// Uses the TypeSpec compiler API to discover models, relations, and permissions.
+// Kessel Schema Emitter
+// Single entry point: compiles TypeSpec, discovers resources and permissions,
+// expands V1 permissions, and emits the requested output format.
 //
-// Output conventions:
-//   - Assignable relations use t_ prefix (e.g. t_workspace, t_binding)
-//   - Permissions wrap relations (e.g. permission binding = t_binding)
-//   - Wildcards use "any" (e.g. any_any_any, inventory_any_any)
-//   - Workspace binding is "binding"
-//   - view_metadata accumulates all read-verb v2 permissions
-//
-// Usage: npx tsx src/spicedb-emitter.ts [schema/main.tsp] [--metadata] [--ir [outpath]] [--lenient-extensions]
+// Usage: npx tsx src/spicedb-emitter.ts [schema/main.tsp] [--metadata] [--ir [outpath]] [--unified-jsonschema]
 
 import * as fs from "fs";
-import { compileAndDiscover } from "./compile-and-discover.js";
 import {
+  compile,
+  NodeHost,
+  discoverResources,
   generateSpiceDB,
   generateMetadata,
   generateUnifiedJsonSchemas,
   generateIR,
   path,
 } from "./lib.js";
-import { expandSchemaWithExtensions } from "./pipeline.js";
+import {
+  discoverV1Permissions,
+  discoverAnnotations,
+  expandV1Permissions,
+} from "./expand.js";
 
 async function main() {
   const args = process.argv.slice(2);
-  const emitMetadata = args.includes("--metadata");
-  const emitUnifiedJsonSchema = args.includes("--unified-jsonschema");
-  const emitIR = args.includes("--ir");
-  const lenientExtensions = args.includes("--lenient-extensions");
-  const mainFile =
-    args.find((a) => !a.startsWith("--")) ||
+  const mainFile = args.find((a) => !a.startsWith("--")) ||
     path.resolve(import.meta.dirname ?? ".", "../schema/main.tsp");
   const resolvedMain = path.resolve(mainFile);
 
   console.error(`Compiling ${resolvedMain}...`);
 
-  const { resources, extensions, program } = await compileAndDiscover(resolvedMain);
-  const { fullSchema, jsonSchemaFields, annotations } = expandSchemaWithExtensions(
-    program,
-    resources,
-    { strict: !lenientExtensions },
-  );
+  const program = await compile(NodeHost, resolvedMain, { noEmit: true });
+  const hasErrors = program.diagnostics.some((d) => d.severity === "error");
+  if (hasErrors) {
+    const msgs = program.diagnostics.filter((d) => d.severity === "error").map((d) => d.message);
+    throw new Error(`Compilation failed:\n${msgs.join("\n")}`);
+  }
+
+  const { resources } = discoverResources(program);
+  const permissions = discoverV1Permissions(program);
+  const annotations = discoverAnnotations(program);
+  const fullSchema = expandV1Permissions(resources, permissions);
 
   console.error(
-    `Discovered ${resources.length} resources, ${extensions.length} V1 extensions, expanded to ${fullSchema.length} resource defs.`,
+    `Discovered ${resources.length} resources, ${permissions.length} V1 extensions, expanded to ${fullSchema.length} resource defs.`,
   );
 
-  if (emitIR) {
+  if (args.includes("--ir")) {
     const irIndex = args.indexOf("--ir");
     const nextArg = args[irIndex + 1];
     const outPath = nextArg && !nextArg.startsWith("--")
       ? nextArg
       : path.resolve(import.meta.dirname ?? ".", "../go-consumer/resources.json");
-    const ir = generateIR(
-      resolvedMain,
-      fullSchema,
-      extensions,
-      jsonSchemaFields,
-      annotations,
-    );
+    const ir = generateIR(resolvedMain, fullSchema, permissions, annotations);
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
     fs.writeFileSync(outPath, JSON.stringify(ir, null, 2) + "\n");
     console.error(`Wrote IR to ${outPath}`);
-  } else if (emitMetadata) {
-    const metadata = generateMetadata(fullSchema, extensions);
-    console.log(JSON.stringify(metadata, null, 2));
-  } else if (emitUnifiedJsonSchema) {
-    const schemas = generateUnifiedJsonSchemas(fullSchema, jsonSchemaFields);
-    console.log(JSON.stringify(schemas, null, 2));
+  } else if (args.includes("--metadata")) {
+    console.log(JSON.stringify(generateMetadata(fullSchema, permissions), null, 2));
+  } else if (args.includes("--unified-jsonschema")) {
+    console.log(JSON.stringify(generateUnifiedJsonSchemas(fullSchema), null, 2));
   } else {
-    const output = generateSpiceDB(fullSchema);
-
     console.log("// Generated SpiceDB/Zed Schema from TypeSpec type graph");
     console.log("// Produced by walking the compiled TypeSpec program.");
     console.log("");
-    console.log(output);
+    console.log(generateSpiceDB(fullSchema));
   }
 }
 

@@ -39,5 +39,5 @@ model Workspace {
   binding: Assignable<RoleBinding, Cardinality.Any>;
 }
 
-// Service extensions: use Kessel.V1WorkspacePermission from ../lib/kessel-extensions.tsp
+// Service extensions: use Kessel.V1WorkspacePermission from ../lib/rbac-v1-extensions.tsp
 // (declarative patch rules; generic emitter applies patches to this schema).

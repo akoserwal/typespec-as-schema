@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   generateUnifiedJsonSchemas,
-  extensionResourceMatchesModel,
   type ResourceDef,
 } from "../../src/lib.js";
 
@@ -74,84 +73,6 @@ describe("generateUnifiedJsonSchemas", () => {
 
     const schemas = generateUnifiedJsonSchemas(resources);
     expect(schemas["inventory/host"]).toBeUndefined();
-  });
-
-  it("scopes extension-declared fields by application and resource slug", () => {
-    const resources: ResourceDef[] = [
-      {
-        name: "host",
-        namespace: "inventory",
-        relations: [
-          {
-            name: "workspace",
-            body: {
-              kind: "assignable",
-              target: "rbac/workspace",
-              cardinality: "ExactlyOne",
-            },
-          },
-        ],
-      },
-    ];
-
-    const schemas = generateUnifiedJsonSchemas(resources, [
-      {
-        fieldName: "inventory_host_view_id",
-        fieldType: "string",
-        format: "uuid",
-        required: true,
-        application: "inventory",
-        resource: "hosts",
-      },
-      {
-        fieldName: "remediations_remediation_view_id",
-        fieldType: "string",
-        format: "uuid",
-        required: true,
-        application: "remediations",
-        resource: "remediations",
-      },
-    ]);
-
-    const hostSchema = schemas["inventory/host"];
-    expect(hostSchema.properties["inventory_host_view_id"]).toBeDefined();
-    expect(hostSchema.properties["remediations_remediation_view_id"]).toBeUndefined();
-  });
-
-  it("throws on duplicate extension field name on the same resource", () => {
-    const resources: ResourceDef[] = [
-      {
-        name: "host",
-        namespace: "inventory",
-        relations: [
-          {
-            name: "workspace",
-            body: {
-              kind: "assignable",
-              target: "rbac/workspace",
-              cardinality: "ExactlyOne",
-            },
-          },
-        ],
-      },
-    ];
-
-    expect(() =>
-      generateUnifiedJsonSchemas(resources, [
-        {
-          fieldName: "dup_id",
-          fieldType: "string",
-          required: true,
-          application: "inventory",
-        },
-        {
-          fieldName: "dup_id",
-          fieldType: "string",
-          required: false,
-          application: "inventory",
-        },
-      ]),
-    ).toThrow(/duplicate property/);
   });
 
   it("includes source provenance in property", () => {

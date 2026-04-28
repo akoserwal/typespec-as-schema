@@ -2,14 +2,16 @@ import { describe, it, expect, beforeAll } from "vitest";
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { compileAndDiscover } from "../../src/compile-and-discover.js";
 import {
+  compile,
+  NodeHost,
+  discoverResources,
   generateSpiceDB,
   generateMetadata,
   type ResourceDef,
   type V1Extension,
 } from "../../src/lib.js";
-import { expandSchemaWithExtensions } from "../../src/pipeline.js";
+import { discoverV1Permissions, expandV1Permissions } from "../../src/expand.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pocRoot = path.resolve(__dirname, "../..");
@@ -23,14 +25,11 @@ let fullSchema: ResourceDef[];
 let spicedbOutput: string;
 
 beforeAll(async () => {
-  const discovered = await compileAndDiscover(mainTsp);
+  const program = await compile(NodeHost, mainTsp, { noEmit: true });
+  const discovered = discoverResources(program);
   resources = discovered.resources;
-  extensions = discovered.extensions;
-  const { fullSchema: expanded } = expandSchemaWithExtensions(
-    discovered.program,
-    resources,
-  );
-  fullSchema = expanded;
+  extensions = discoverV1Permissions(program);
+  fullSchema = expandV1Permissions(resources, extensions);
   spicedbOutput = generateSpiceDB(fullSchema);
 }, 30_000);
 
