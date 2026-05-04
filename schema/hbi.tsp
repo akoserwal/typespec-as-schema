@@ -13,8 +13,8 @@ using Kessel;
 namespace Inventory;
 
 // ─── Extension Applications ──────────────────────────────────────────
-// Patch rules live on Kessel.V1WorkspacePermission (../lib/kessel-extensions.tsp);
-// the generic emitter applies them to Role, RoleBinding, and Workspace.
+// Template declarations from ../lib/kessel-extensions.tsp;
+// expansion logic is service-owned in schema/extensions/.
 
 /** Maps inventory:hosts:read → inventory_host_view on workspace */
 alias viewPermission = Kessel.V1WorkspacePermission<

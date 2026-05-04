@@ -15,14 +15,17 @@ v2/typespec-as-schema/
 │   ├── main.tsp                     Entrypoint -- one import line per service
 │   ├── rbac.tsp                     RBAC core (platform-owned)
 │   ├── hbi.tsp                      HBI service (service team owns)
-│   └── remediations.tsp             Remediations service (service team owns)
+│   ├── remediations.tsp             Remediations service (service team owns)
+│   └── extensions/               <- SERVICE-OWNED extension logic (TypeScript)
+│       ├── v1-workspace-permission.ts   V1 permission expansion handler
+│       └── cascade-delete.ts            Cascade delete expansion handler
 ├── src/                          <- PLATFORM-OWNED (don't touch)
 │   ├── types.ts                     Core interfaces
 │   ├── utils.ts                     Shared helpers (bodyToZed, slotName, findResource, etc.)
+│   ├── sdk.ts                       Extension SDK (primitives for schema mutation)
 │   ├── parser.ts                    Permission expression parser
 │   ├── registry.ts                  Extension template registry (names, params, namespaces)
 │   ├── discover.ts                  AST walking: resource + extension instance discovery
-│   ├── expand.ts                    Pure expansion math (no AST, no TypeSpec imports)
 │   ├── pipeline.ts                  Pipeline orchestration (compile → discover → expand → generate)
 │   ├── generate.ts                  Output generators (SpiceDB, JSON Schema, metadata, IR)
 │   ├── safety.ts                    Validation guards
@@ -32,8 +35,13 @@ v2/typespec-as-schema/
     └── schema/                      Go structs + embedded IR
 ```
 
-Service teams only work in `schema/`. Everything in `lib/` and `src/` is
-platform code that service teams never need to modify.
+Service teams work in `schema/` for alias declarations (`.tsp` files)
+and in `schema/extensions/` for extension logic (`.ts` handler files).
+
+The `schema/extensions/` directory contains TypeScript files that define
+**how** each extension template is expanded into SpiceDB relations.
+These handlers import primitives from `src/sdk.ts` (the platform SDK)
+and are auto-discovered by the pipeline at runtime. 
 
 ### What service authors use
 
@@ -371,28 +379,34 @@ The production `rbac-config` repository has four extension types:
 Our POC currently implements the first one (`V1WorkspacePermission`).
 Here is how to add the other two that matter for service teams.
 
-### How extensions work: the trust boundary
+### How extensions work: the ownership model
 
-Every extension has two parts on opposite sides of a trust boundary:
+Every extension has three layers across the platform/service boundary:
 
 ```
-  SERVICE AUTHORS (schema/)              PLATFORM TEAM (lib/ + src/)
-  ──────────────────────────            ────────────────────────────
-  Write alias declarations:             1. Template in kessel-extensions.tsp
-                                           (parameter shape, no logic)
-  alias foo = Kessel.Template<           2. Registry entry in registry.ts
-    "param1", "param2"                      (template name, params, namespace)
-  >;                                     3. Discovery in discover.ts
-                                            (AST walking, find all instances)
-  Zero computation.                      4. Expansion in expand.ts
-  Only type declarations.                   (bounded mutations, O(N), no AST)
-                                         5. Wire into pipeline.ts
-                                            (call discover + expand in order)
+  PLATFORM TEAM (lib/ + src/)            SERVICE AUTHORS (schema/)
+  ────────────────────────────          ──────────────────────────
+  1. Template in kessel-extensions.tsp   Write alias declarations:
+     (parameter shape, no logic)
+  2. Registry entry in registry.ts       alias foo = Kessel.Template<
+     (template name, params, namespace)    "param1", "param2"
+  3. SDK primitives in sdk.ts            >;
+     (addRelation, getRelation,
+      replaceBody, getOrAddRelation,     Zero computation.
+      ref, or, and, subref, ...)         Only type declarations.
+
+                                         Handler in schema/extensions/:
+                                         (expansion logic using SDK
+                                          primitives, auto-discovered
+                                          by the pipeline)
 ```
 
-Adding a new extension type means adding platform code (steps 1--5).
-Service authors then use it by writing alias declarations -- no
-TypeScript, no logic.
+Adding a new extension type requires:
+- **Platform**: template (`.tsp`) + registry entry (one line)
+- **Service**: handler file in `schema/extensions/` using SDK primitives
+
+The pipeline auto-discovers handlers from `schema/extensions/` and runs
+them in filename sort order. No manual wiring in `pipeline.ts` is needed.
 
 ---
 
@@ -421,9 +435,11 @@ AND (2) the user can view hosts in HBI. The `_assigned` permission
 covers condition 1. The contingent permission intersects it with
 `inventory_host_view` to enforce both conditions at the workspace level.
 
-#### Platform implementation
+#### Implementation
 
-**`lib/kessel-extensions.tsp`** -- add the template:
+Two parts: a platform template + registry entry, and a service-owned handler.
+
+**`lib/kessel-extensions.tsp`** -- add the template (platform-owned):
 
 ```typespec
 /**
@@ -443,7 +459,7 @@ model ContingentPermission<
 }
 ```
 
-**`src/registry.ts`** -- register the template:
+**`src/registry.ts`** -- register the template (platform-owned):
 
 ```typescript
 export const EXTENSION_TEMPLATES: readonly ExtensionTemplateDef[] = [
@@ -454,58 +470,45 @@ export const EXTENSION_TEMPLATES: readonly ExtensionTemplateDef[] = [
 ];
 ```
 
-**`src/discover.ts`** -- add a discovery function (AST walking):
+**`schema/extensions/contingent-permission.ts`** -- handler file (service-owned):
+
+The handler uses SDK primitives from `src/sdk.ts`. The pipeline
+auto-discovers it from `schema/extensions/` -- no wiring needed.
 
 ```typescript
-export interface ContingentExtension {
-  first: string;
-  second: string;
-  contingent: string;
-}
+import type { ExtensionHandler, ExpansionResult } from "../../src/sdk.js";
+import {
+  addRelation, and, ref, resolveRBACScaffold, cloneResources,
+} from "../../src/sdk.js";
 
-export function discoverContingentPermissions(
-  program: Program,
-  warnings?: DiscoveryWarnings,
-): ContingentExtension[] {
-  const def = getTemplate("ContingentPermission");
-  const { results, skipped } = discoverInstances(program, def);
-  if (warnings) warnings.skipped.push(...skipped);
-  return results.filter(
-    (p): p is Record<string, string> & ContingentExtension =>
-      !!(p.first && p.second && p.contingent),
-  );
-}
+const handler: ExtensionHandler = {
+  name: "ContingentPermission",
+  templateName: "ContingentPermission",
+
+  expand(baseResources, instances) {
+    const policies = instances.filter(
+      (p) => !!(p.first && p.second && p.contingent),
+    );
+
+    const resources = cloneResources(baseResources);
+    const { scaffold, warnings } = resolveRBACScaffold(resources);
+    if (!scaffold) return { resources, warnings };
+
+    for (const ext of policies) {
+      addRelation(scaffold.workspace, {
+        name: ext.contingent,
+        body: and(ref(ext.first), ref(ext.second)),
+      });
+    }
+
+    return { resources, warnings };
+  },
+};
+
+export default handler;
 ```
 
-**`src/expand.ts`** -- add pure expansion logic (no TypeSpec imports):
 
-```typescript
-export function expandContingentPermissions(
-  resources: ResourceDef[],
-  extensions: ContingentExtension[],
-): ResourceDef[] {
-  const result = cloneResources(resources);
-  const workspace = findResource(result, "rbac", "workspace");
-  if (!workspace) return result;
-
-  for (const ext of extensions) {
-    addRelation(workspace, {
-      name: ext.contingent,
-      body: and(ref(ext.first), ref(ext.second)),
-    });
-  }
-
-  return result;
-}
-```
-
-**`src/pipeline.ts`** -- wire into the pipeline:
-
-```typescript
-// After V1 expansion:
-const contingentPerms = discoverContingentPermissions(program, discoveryWarnings);
-const contingentResult = expandContingentPermissions(expanded, contingentPerms);
-```
 
 #### What service authors write
 
@@ -584,9 +587,11 @@ The same 3-step pattern is used by
 [patch.ksl](https://github.com/RedHatInsights/rbac-config/blob/master/configs/prod/schemas/src/patch.ksl)
 and [ros.ksl](https://github.com/RedHatInsights/rbac-config/blob/master/configs/prod/schemas/src/ros.ksl).
 
-#### Platform implementation
+#### Implementation
 
-**`lib/kessel-extensions.tsp`** -- add the template:
+Same pattern: platform template + registry entry, service-owned handler.
+
+**`lib/kessel-extensions.tsp`** -- add the template (platform-owned):
 
 ```typespec
 /**
@@ -605,7 +610,7 @@ model ExposeHostPermission<
 }
 ```
 
-**`src/registry.ts`** -- add to the registry:
+**`src/registry.ts`** -- add to the registry (platform-owned):
 
 ```typescript
 export const EXTENSION_TEMPLATES: readonly ExtensionTemplateDef[] = [
@@ -615,59 +620,43 @@ export const EXTENSION_TEMPLATES: readonly ExtensionTemplateDef[] = [
 ];
 ```
 
-**`src/discover.ts`** -- add discovery:
+**`schema/extensions/expose-host-permission.ts`** -- handler file (service-owned):
 
 ```typescript
-export interface ExposeHostExtension {
-  v2Perm: string;
-  hostPerm: string;
-}
+import type { ExtensionHandler, ExpansionResult } from "../../src/sdk.js";
+import {
+  addRelation, and, ref, subref, findResource, cloneResources,
+} from "../../src/sdk.js";
 
-export function discoverExposeHostPermissions(
-  program: Program,
-  warnings?: DiscoveryWarnings,
-): ExposeHostExtension[] {
-  const def = getTemplate("ExposeHostPermission");
-  const { results, skipped } = discoverInstances(program, def);
-  if (warnings) warnings.skipped.push(...skipped);
-  return results.filter(
-    (p): p is Record<string, string> & ExposeHostExtension =>
-      !!(p.v2Perm && p.hostPerm),
-  );
-}
-```
+const handler: ExtensionHandler = {
+  name: "ExposeHostPermission",
+  templateName: "ExposeHostPermission",
 
-**`src/expand.ts`** -- add pure expansion:
+  expand(baseResources, instances) {
+    const policies = instances.filter(
+      (p) => !!(p.v2Perm && p.hostPerm),
+    );
 
-```typescript
-export function expandExposeHostPermissions(
-  resources: ResourceDef[],
-  extensions: ExposeHostExtension[],
-): ResourceDef[] {
-  const result = cloneResources(resources);
-  const host = findResource(result, "inventory", "host");
-  if (!host) return result;
+    const resources = cloneResources(baseResources);
+    const warnings: string[] = [];
+    const host = findResource(resources, "inventory", "host");
+    if (!host) {
+      warnings.push("inventory/host not found -- ExposeHostPermission skipped.");
+      return { resources, warnings };
+    }
 
-  for (const ext of extensions) {
-    addRelation(host, {
-      name: ext.hostPerm,
-      body: and(
-        ref("view"),
-        subref("workspace", ext.v2Perm),
-      ),
-    });
-  }
+    for (const ext of policies) {
+      addRelation(host, {
+        name: ext.hostPerm,
+        body: and(ref("view"), subref("workspace", ext.v2Perm)),
+      });
+    }
 
-  return result;
-}
-```
+    return { resources, warnings };
+  },
+};
 
-**`src/pipeline.ts`** -- wire into the pipeline:
-
-```typescript
-// After contingent expansion:
-const exposeHostPerms = discoverExposeHostPermissions(program, discoveryWarnings);
-const exposeResult = expandExposeHostPermissions(contingentResult, exposeHostPerms);
+export default handler;
 ```
 
 #### What service authors write
@@ -803,18 +792,31 @@ permission advisor_recommendation_results_edit = (view & t_workspace->advisor_re
 
 ## Pipeline Ordering
 
-Extensions must run in order because later ones reference permissions
-created by earlier ones:
+Extension handlers run in **filename sort order** within
+`schema/extensions/`. Later handlers can reference permissions created
+by earlier ones:
 
 ```
-1. V1WorkspacePermission      -> creates _assigned perms on workspace
-2. ContingentPermission       -> intersects workspace perms (needs step 1)
-3. ExposeHostPermission       -> references workspace perms on host (needs step 2)
-4. view_metadata accumulation -> ORs all read-verb perms (after all workspace perms exist)
+schema/extensions/
+├── cascade-delete.ts               runs 1st (c...)
+├── contingent-permission.ts        runs 2nd (c... -- after cascade)
+├── expose-host-permission.ts       runs 3rd (e...)
+└── v1-workspace-permission.ts      runs 4th (v...)
 ```
 
-This ordering is explicit in `src/pipeline.ts` (called by `spicedb-emitter.ts`).
-No implicit dependency resolution is needed.
+If ordering matters (e.g., `ContingentPermission` needs workspace
+permissions created by `V1WorkspacePermission`), use numeric prefixes:
+
+```
+schema/extensions/
+├── 01-v1-workspace-permission.ts   runs 1st -- creates workspace perms
+├── 02-cascade-delete.ts            runs 2nd -- adds delete permissions
+├── 03-contingent-permission.ts     runs 3rd -- intersects workspace perms (needs step 1)
+└── 04-expose-host-permission.ts    runs 4th -- references workspace perms on host (needs step 3)
+```
+
+The `view_metadata` accumulation happens inside the V1 handler itself
+(incrementally via `replaceBody`) rather than as a separate pipeline step.
 
 ---
 
@@ -842,9 +844,14 @@ Service authors never write computation -- only type alias declarations.
 | New data fields on existing type | Service team | Edit `*Data` model | ~5 | No |
 | Attach metadata annotation | Service team | 1 alias line | ~5 | No |
 | Use existing extension template | Service team | 1 alias line | ~5 | No |
-| **New extension template** | Platform team | Template + discovery + expansion | ~50 | Yes |
+| **New extension template** | Platform + service | Template + registry entry + handler file | ~40 | Yes |
 
-The last row is the only case requiring TypeScript, and that work is
-done by the platform team -- not service teams. The structural safety
-guarantee holds: service authors write zero computation regardless of
-how many extension types exist.
+The last row is the only case requiring TypeScript. It involves:
+
+- **Platform team**: template in `lib/kessel-extensions.tsp` + registry
+  entry in `src/registry.ts` (defines the parameter shape)
+- **Service team**: handler file in `schema/extensions/` (defines the
+  expansion logic using SDK primitives from `src/sdk.ts`)
+
+For all other tasks, service authors write zero TypeScript -- only
+`.tsp` alias declarations.

@@ -40,4 +40,4 @@ model Workspace {
 }
 
 // Service extensions: use Kessel.V1WorkspacePermission from ../lib/kessel-extensions.tsp
-// (declarative patch rules; generic emitter applies patches to this schema).
+// (template declarations; expansion logic is service-owned in schema/extensions/).

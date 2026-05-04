@@ -35,16 +35,26 @@ export {
   discoverV1Permissions,
   discoverAnnotations,
   discoverCascadeDeletePolicies,
+  discoverInstances,
   VALID_VERBS,
 } from "./discover.js";
-export type { DiscoveryWarnings, DiscoveryStats } from "./discover.js";
+export type { DiscoveryWarnings, DiscoveryStats, DiscoverInstancesResult } from "./discover.js";
 
 export {
-  expandV1Permissions,
-  expandCascadeDeletePolicies,
+  addRelation,
+  addBoolRelation,
+  getRelation,
+  replaceBody,
+  getOrAddRelation,
+  hasRelation,
+  ref,
+  subref,
+  or,
+  and,
   resolveRBACScaffold,
-} from "./expand.js";
-export type { ScaffoldResult, ExpansionResult } from "./expand.js";
+  RBAC_RELATIONS,
+} from "./sdk.js";
+export type { ScaffoldResult, ExpansionResult, ExtensionHandler, BodyMutator } from "./sdk.js";
 
 export {
   generateSpiceDB,

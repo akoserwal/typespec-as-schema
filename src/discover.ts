@@ -116,14 +116,14 @@ export function isInstanceOf(model: Model, template: Model): boolean {
 
 // ─── Extension instance discovery ────────────────────────────────────
 
-interface DiscoverInstancesResult {
+export interface DiscoverInstancesResult {
   results: Record<string, string>[];
   skipped: string[];
   aliasesAttempted: number;
   aliasesResolved: number;
 }
 
-function discoverInstances(
+export function discoverInstances(
   program: Program,
   def: ExtensionTemplateDef,
 ): DiscoverInstancesResult {

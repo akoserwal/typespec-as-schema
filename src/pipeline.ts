@@ -1,17 +1,17 @@
+import * as fs from "fs";
+import * as path from "path";
 import { compile, NodeHost, type Program, type CompilerOptions } from "@typespec/compiler";
 import type { ResourceDef, V1Extension, UnifiedJsonSchema, CascadeDeleteEntry, AnnotationEntry } from "./types.js";
 import {
   discoverResources,
-  discoverV1Permissions,
   discoverAnnotations,
-  discoverCascadeDeletePolicies,
+  discoverInstances,
   type DiscoveryWarnings,
 } from "./discover.js";
 import { generateSpiceDB, generateUnifiedJsonSchemas } from "./generate.js";
-import {
-  expandV1Permissions,
-  expandCascadeDeletePolicies,
-} from "./expand.js";
+import { EXTENSION_TEMPLATES } from "./registry.js";
+import type { ExtensionHandler, ExpansionResult } from "./sdk.js";
+import { cloneResources } from "./utils.js";
 import {
   validateComplexityBudget,
   validatePreExpansionExpressions,
@@ -29,6 +29,8 @@ export interface PipelineOptions {
   emitJsonSchema?: boolean;
   /** Output directory for emitters (defaults to tsp-output next to the main file). */
   outputDir?: string;
+  /** Override the directory to scan for extension handler .ts files. */
+  extensionsDir?: string;
 }
 
 export interface PipelineResult {
@@ -43,10 +45,42 @@ export interface PipelineResult {
   warnings: string[];
 }
 
+// ─── Extension handler discovery ────────────────────────────────────
+
+async function loadExtensionHandlers(extensionsDir: string): Promise<ExtensionHandler[]> {
+  if (!fs.existsSync(extensionsDir)) return [];
+
+  const files = fs.readdirSync(extensionsDir)
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts") && !f.endsWith(".test.ts"))
+    .sort();
+
+  const handlers: ExtensionHandler[] = [];
+
+  for (const file of files) {
+    const fullPath = path.resolve(extensionsDir, file);
+    try {
+      const mod = await import(fullPath);
+      const handler: ExtensionHandler | undefined = mod.default ?? mod.handler;
+      if (handler && typeof handler.expand === "function" && handler.templateName) {
+        handlers.push(handler);
+      }
+    } catch {
+      // Skip files that fail to load — they may be non-handler utilities
+    }
+  }
+
+  return handlers;
+}
+
+// ─── Pipeline ───────────────────────────────────────────────────────
+
 /**
  * Compiles a TypeSpec schema and runs the full discovery/validation/expansion
  * pipeline. This is the single source of truth for the pipeline — both the CLI
  * and tests call this function.
+ *
+ * Extension handlers are auto-discovered from schema/extensions/ (relative to
+ * the main .tsp file) and executed in sorted filename order.
  */
 export async function compilePipeline(
   mainFile: string,
@@ -79,18 +113,64 @@ export async function compilePipeline(
   const { resources } = discoverResources(program);
   discoveryWarnings.stats.resourcesFound = resources.length;
 
-  const extensions = discoverV1Permissions(program, discoveryWarnings);
+  // Annotations are platform-owned metadata — always discovered by the platform.
   const annotations = discoverAnnotations(program, discoveryWarnings);
-  const cascadePolicies = discoverCascadeDeletePolicies(program, discoveryWarnings);
 
-  warnings.push(...discoveryWarnings.skipped);
+  // Discover extension handlers from schema/extensions/
+  const schemaDir = path.dirname(path.resolve(mainFile));
+  const extensionsDir = options?.extensionsDir ?? path.resolve(schemaDir, "extensions");
+  const handlers = await loadExtensionHandlers(extensionsDir);
 
-  const { stats } = discoveryWarnings;
-  if (discoveryWarnings.skipped.length > 0) {
-    warnings.push(
-      `Alias resolution: ${stats.aliasesResolved}/${stats.aliasesAttempted} resolved, ` +
-      `${stats.aliasesAttempted - stats.aliasesResolved} skipped`,
+  let fullSchema: ResourceDef[];
+  let extensions: V1Extension[] = [];
+  let cascadePolicies: CascadeDeleteEntry[] = [];
+
+  // Handler-based expansion: discover all instances first, validate,
+  // then expand each handler in sequence.
+  const handlerWork: {
+    handler: ExtensionHandler;
+    instances: Record<string, string>[];
+  }[] = [];
+
+  for (const handler of handlers) {
+    const templateDef = EXTENSION_TEMPLATES.find(
+      (t) => t.templateName === handler.templateName,
     );
+    if (!templateDef) {
+      warnings.push(
+        `Extension handler "${handler.name}" references unknown template "${handler.templateName}" — skipped.`,
+      );
+      continue;
+    }
+
+    const { results: instances, skipped, aliasesAttempted, aliasesResolved } =
+      discoverInstances(program, templateDef);
+
+    discoveryWarnings.skipped.push(...skipped);
+    discoveryWarnings.stats.aliasesAttempted += aliasesAttempted;
+    discoveryWarnings.stats.aliasesResolved += aliasesResolved;
+    discoveryWarnings.stats.extensionsFound += instances.length;
+
+    handlerWork.push({ handler, instances });
+
+    if (handler.templateName === "V1WorkspacePermission") {
+      extensions = instances
+        .filter((p) => !!(p.application && p.resource && p.verb && p.v2Perm))
+        .map((p) => ({
+          application: p.application,
+          resource: p.resource,
+          verb: p.verb as V1Extension["verb"],
+          v2Perm: p.v2Perm,
+        }));
+    } else if (handler.templateName === "CascadeDeletePolicy") {
+      cascadePolicies = instances
+        .filter((p) => !!(p.childApplication && p.childResource && p.parentRelation))
+        .map((p) => ({
+          childApplication: p.childApplication,
+          childResource: p.childResource,
+          parentRelation: p.parentRelation,
+        }));
+    }
   }
 
   const knownNamespaces = new Set(resources.map((r) => r.namespace));
@@ -102,20 +182,36 @@ export async function compilePipeline(
 
   validateComplexityBudget(extensions, limits);
 
+  let running = cloneResources(resources);
+  for (const { handler, instances } of handlerWork) {
+    const expansionStart = performance.now();
+    const { resources: expanded, warnings: handlerWarnings } = handler.expand(running, instances);
+    const expansionElapsed = performance.now() - expansionStart;
+
+    if (expansionElapsed > limits.expansionTimeoutMs) {
+      throw new ExpansionTimeoutError(Math.round(expansionElapsed), limits.expansionTimeoutMs);
+    }
+
+    running = expanded;
+    warnings.push(...handlerWarnings);
+  }
+
+  fullSchema = running;
+
+  warnings.push(...discoveryWarnings.skipped);
+  const { stats } = discoveryWarnings;
+  if (discoveryWarnings.skipped.length > 0) {
+    warnings.push(
+      `Alias resolution: ${stats.aliasesResolved}/${stats.aliasesAttempted} resolved, ` +
+      `${stats.aliasesAttempted - stats.aliasesResolved} skipped`,
+    );
+  }
+
   const preExpansionDiags = validatePreExpansionExpressions(resources);
   if (preExpansionDiags.length > 0) {
     for (const d of preExpansionDiags) {
       warnings.push(`Pre-expansion: ${d.resource}.${d.relation}: ${d.message}`);
     }
-  }
-
-  const expansionStart = performance.now();
-  const { resources: expanded, warnings: expansionWarnings } = expandV1Permissions(resources, extensions);
-  warnings.push(...expansionWarnings);
-  const fullSchema = expandCascadeDeletePolicies(expanded, cascadePolicies);
-  const expansionElapsed = performance.now() - expansionStart;
-  if (expansionElapsed > limits.expansionTimeoutMs) {
-    throw new ExpansionTimeoutError(Math.round(expansionElapsed), limits.expansionTimeoutMs);
   }
 
   const diagnostics = validatePermissionExpressions(fullSchema);

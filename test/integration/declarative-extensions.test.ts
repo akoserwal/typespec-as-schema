@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "vitest";
 import { generateIR, IR_VERSION } from "../../src/lib.js";
-import { expandCascadeDeletePolicies } from "../../src/expand.js";
+import cascadeHandler from "../../schema/extensions/cascade-delete.js";
 import { compilePipeline, type PipelineResult } from "../helpers/pipeline.js";
 
 let pipeline: PipelineResult;
@@ -8,8 +8,6 @@ let pipeline: PipelineResult;
 beforeAll(async () => {
   pipeline = await compilePipeline();
 }, 30_000);
-
-// ─── Discovery Tests ─────────────────────────────────────────────────
 
 describe("V1 permission discovery", () => {
   it("discovers 4 V1WorkspacePermission instances from schema/main.tsp", () => {
@@ -185,7 +183,12 @@ describe("CascadeDeletePolicy discovery and expansion", () => {
   });
 
   it("does not duplicate delete if called twice", () => {
-    const doubleExpanded = expandCascadeDeletePolicies(pipeline.fullSchema, pipeline.cascadePolicies);
+    const instances = pipeline.cascadePolicies.map((p) => ({
+      childApplication: p.childApplication,
+      childResource: p.childResource,
+      parentRelation: p.parentRelation,
+    }));
+    const { resources: doubleExpanded } = cascadeHandler.expand(pipeline.fullSchema, instances);
     const host = doubleExpanded.find((r) => r.name === "host" && r.namespace === "inventory")!;
     const deleteCount = host.relations.filter((r) => r.name === "delete").length;
     expect(deleteCount).toBe(1);
